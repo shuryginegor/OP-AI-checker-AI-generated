@@ -335,7 +335,14 @@ const SUBJECT_SPECIFICS: Record<number, {
   }
 };
 
-export function generateSampleCriteria(seed: number, isHigh: boolean = false, subject: string = '', teacherName: string = ''): CriterionResult[] {
+export function generateSampleCriteria(
+  seed: number,
+  isHigh: boolean = false,
+  subject: string = '',
+  teacherName: string = '',
+  customCriteriaList?: Array<{ id: number; text: string; category: string }>
+): CriterionResult[] {
+  const activeList = (customCriteriaList && customCriteriaList.length > 0) ? customCriteriaList : STANDARD_CRITERIA_LIST;
   const subLower = (subject || '').toLowerCase();
   const domain: 'math' | 'physics' | 'cs' | 'general' = subLower.includes('физик') ? 'physics'
     : (subLower.includes('информ') || subLower.includes('программ') || subLower.includes('код') || subLower.includes('it') || subLower.includes('алгоритм')) ? 'cs'
@@ -369,7 +376,7 @@ export function generateSampleCriteria(seed: number, isHigh: boolean = false, su
     ? (rawFailed.length > 0 ? [rawFailed[0]] : [])
     : rawFailed;
 
-  return STANDARD_CRITERIA_LIST.map((c, i) => {
+  return activeList.map((c, i) => {
     const isFailed = failedIndices.includes(c.id);
     const metric = CRITERIA_METRICS[c.id];
 
@@ -384,8 +391,14 @@ export function generateSampleCriteria(seed: number, isHigh: boolean = false, su
       return `${hours}:${mins}:${secs}`;
     };
 
-    let comment = isFailed ? metric.failedComment : metric.passedComment;
-    let quote = isFailed ? metric.failedQuote : metric.passedQuote;
+    let comment = isFailed
+      ? (metric?.failedComment || `Зафиксирован недочёт по критерию «${c.category}»: требуется внимание методиста.`)
+      : (metric?.passedComment || `Преподаватель полностью выполнил методический стандарт по критерию «${c.category}».`);
+
+    let quote = isFailed
+      ? (metric?.failedQuote || `«...зафиксировано отклонение от регламента по категории ${c.category}...»`)
+      : (metric?.passedQuote || `«...материал изложен в полном соответствии со стандартом...»`);
+
     const timecodes = isFailed 
       ? [formatTime(14 + i * 2), formatTime(42 + i * 2)]
       : [formatTime(6 + i * 3)];

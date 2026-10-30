@@ -39,6 +39,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { PromptEditor } from './components/PromptEditor';
+import { CriteriaManager } from './components/CriteriaManager';
 
 // Official Brand Logo component for "Олимпиадные Практики" (olympiadpractices.ru)
 function OlympLogo({ className = "w-8 h-8" }: { className?: string }) {
@@ -172,7 +173,7 @@ export default function App() {
   const [loginMessage, setLoginMessage] = useState<string>('');
 
   // Вкладки
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'submit' | 'curators' | 'audit' | 'criteria' | 'prompt_editor' | 'brandbook'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'submit' | 'curators' | 'audit' | 'criteria' | 'prompt_editor' | 'brandbook' | 'criteria_manager'>('dashboard');
 
   // Дашборд и задачи
   const [tasks, setTasks] = useState<any[]>([]);
@@ -190,6 +191,7 @@ export default function App() {
   const [isSubmittingTask, setIsSubmittingTask] = useState<boolean>(false);
   const [submitSuccessTask, setSubmitSuccessTask] = useState<any | null>(null);
   const [submitError, setSubmitError] = useState<string>('');
+  const [duplicateErrorTask, setDuplicateErrorTask] = useState<any | null>(null);
 
   // Управление кураторами (ТОЛЬКО ДЛЯ СТАРШИХ КУРАТОРОВ)
   const [curatorsList, setCuratorsList] = useState<CuratorUser[]>([]);
@@ -205,11 +207,32 @@ export default function App() {
   const [isLoadingAudit, setIsLoadingAudit] = useState<boolean>(false);
   const [auditSearch, setAuditSearch] = useState<string>('');
 
-  // Критерии
+  // Динамические критерии оценки
+  const [dynamicStandardCriteria, setDynamicStandardCriteria] = useState<any[]>(STANDARD_CRITERIA);
+  const [dynamicCriticalCriteria, setDynamicCriticalCriteria] = useState<any[]>(CRITICAL_CRITERIA);
   const [criteriaSearch, setCriteriaSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
 
   const isSenior = currentUser?.role === 'senior_curator';
+
+  const fetchCriteriaConfig = async () => {
+    try {
+      const res = await fetch('/api/criteria/config', {
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+      });
+      const data = await res.json();
+      if (data.success) {
+        if (Array.isArray(data.standardCriteria) && data.standardCriteria.length > 0) {
+          setDynamicStandardCriteria(data.standardCriteria);
+        }
+        if (Array.isArray(data.criticalCriteria) && data.criticalCriteria.length > 0) {
+          setDynamicCriticalCriteria(data.criticalCriteria);
+        }
+      }
+    } catch (e) {
+      console.warn('Не удалось загрузить динамические критерии:', e);
+    }
+  };
 
   // Проверка сессии при запуске
   useEffect(() => {
@@ -294,6 +317,7 @@ export default function App() {
   };
 
   useEffect(() => {
+    fetchCriteriaConfig();
     if (authToken) {
       fetchTasksAndTeachers();
       if (isSenior) {
@@ -399,6 +423,7 @@ export default function App() {
     e.preventDefault();
     setSubmitError('');
     setSubmitSuccessTask(null);
+    setDuplicateErrorTask(null);
 
     const teacherToUse = selectedTeacher === '__new__' ? newTeacherName.trim() : selectedTeacher;
 
@@ -429,6 +454,9 @@ export default function App() {
       const data = await res.json();
 
       if (!res.ok || !data.success) {
+        if (data.code === 'DUPLICATE_URL' || data.existingTask) {
+          setDuplicateErrorTask(data.existingTask);
+        }
         setSubmitError(data.message || 'Ошибка отправки встречи.');
         return;
       }
@@ -437,7 +465,6 @@ export default function App() {
       setLectureUrl('');
       setTasks(prev => [data.task, ...prev.filter(t => t.id !== data.task.id)]);
       setActiveTab('dashboard');
-      setActiveDetailTask(data.task);
       await fetchTasksAndTeachers();
     } catch (err: any) {
       setSubmitError(err.message || 'Сбой подключения к серверу.');
@@ -593,12 +620,15 @@ export default function App() {
     return (
       (t.teacherName || '').toLowerCase().includes(q) ||
       (t.subject || '').toLowerCase().includes(q) ||
-      (t.lectureUrl || '').toLowerCase().includes(q)
+      (t.groupName || '').toLowerCase().includes(q) ||
+      (t.lectureUrl || '').toLowerCase().includes(q) ||
+      (t.date || '').toLowerCase().includes(q) ||
+      (t.curatorEmail || '').toLowerCase().includes(q)
     );
   });
 
-  const categories = ['all', ...Array.from(new Set(STANDARD_CRITERIA.map(c => c.category)))];
-  const filteredCriteria = STANDARD_CRITERIA.filter(c => {
+  const categories = ['all', ...Array.from(new Set(dynamicStandardCriteria.map(c => c.category)))];
+  const filteredCriteria = dynamicStandardCriteria.filter(c => {
     const matchesSearch = c.text.toLowerCase().includes(criteriaSearch.toLowerCase()) || c.id.toString().includes(criteriaSearch);
     const matchesCat = selectedCategory === 'all' || c.category === selectedCategory;
     return matchesSearch && matchesCat;
@@ -792,7 +822,7 @@ export default function App() {
           </button>
 
           <button
-            onClick={() => setActiveTab('criteria')}
+            onClick={() => { setActiveTab('criteria'); fetchCriteriaConfig(); }}
             className={`px-4 py-2 text-xs font-semibold rounded-t-xl transition-all flex items-center gap-2 border-b-2 ${
               activeTab === 'criteria'
                 ? 'border-[#FF5252] text-white bg-[#2B2363]'
@@ -800,10 +830,27 @@ export default function App() {
             }`}
           >
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-            Критерии оценки (21 + 8)
+            Критерии оценки ({dynamicStandardCriteria.length} + {dynamicCriticalCriteria.length})
           </button>
 
           {/* Вкладки ТОЛЬКО ДЛЯ СТАРШИХ КУРАТОРОВ */}
+          {isSenior && (
+            <button
+              onClick={() => { setActiveTab('criteria_manager'); fetchCriteriaConfig(); }}
+              className={`px-4 py-2 text-xs font-semibold rounded-t-xl transition-all flex items-center gap-2 border-b-2 ${
+                activeTab === 'criteria_manager'
+                  ? 'border-[#FF5252] text-white bg-[#2B2363]'
+                  : 'border-transparent text-amber-200/80 hover:text-white hover:bg-[#241E4F]/60'
+              }`}
+            >
+              <Sliders className="w-3.5 h-3.5 text-[#FF5252]" />
+              <span>Управление критериями</span>
+              <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded font-bold border border-amber-500/30">
+                Senior
+              </span>
+            </button>
+          )}
+
           {isSenior && (
             <button
               onClick={() => { setActiveTab('curators'); fetchCurators(); }}
@@ -833,7 +880,7 @@ export default function App() {
               <Database className="w-3.5 h-3.5 text-[#38BDF8]" />
               <span>Аудит действий (БД)</span>
               <span className="text-[9px] bg-cyan-500/20 text-[#38BDF8] px-1.5 py-0.2 rounded font-bold border border-cyan-500/30">
-                БД
+                Senior
               </span>
             </button>
           )}
@@ -929,7 +976,7 @@ export default function App() {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Поиск по преподавателю / предмету..."
+                    placeholder="Поиск по ссылке КТалк / преподавателю / предмету / группе / куратору..."
                     className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252]"
                   />
                 </div>
@@ -979,6 +1026,7 @@ export default function App() {
                       <th className="px-6 py-3">Дата / Время</th>
                       <th className="px-6 py-3">Преподаватель</th>
                       <th className="px-6 py-3">Предмет & Группа</th>
+                      <th className="px-6 py-3">Ссылка на занятие</th>
                       <th className="px-6 py-3 text-center">Балл ИИ</th>
                       <th className="px-6 py-3">Статус обработки</th>
                       <th className="px-6 py-3 text-right">Действие</th>
@@ -1000,6 +1048,22 @@ export default function App() {
                         <td className="px-6 py-4 text-indigo-200">
                           <div>{t.subject}</div>
                           <div className="text-[10px] text-indigo-400">{t.groupName}</div>
+                        </td>
+                        <td className="px-6 py-4 max-w-[200px]" onClick={(e) => e.stopPropagation()}>
+                          {t.lectureUrl ? (
+                            <a
+                              href={t.lectureUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[#38BDF8] hover:text-[#70d3ff] underline text-[11px] font-mono inline-flex items-center gap-1.5 truncate max-w-full"
+                              title={t.lectureUrl}
+                            >
+                              <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                              <span className="truncate">{t.lectureUrl.replace(/^https?:\/\//, '')}</span>
+                            </a>
+                          ) : (
+                            <span className="text-indigo-400 font-mono">—</span>
+                          )}
                         </td>
                         <td className="px-6 py-4 text-center">
                           {t.status === 'completed' ? (
@@ -1059,7 +1123,7 @@ export default function App() {
                     ))}
                     {filteredTasks.length === 0 && (
                       <tr>
-                        <td colSpan={6} className="px-6 py-12 text-center text-xs text-indigo-300">
+                        <td colSpan={7} className="px-6 py-12 text-center text-xs text-indigo-300">
                           <div className="max-w-md mx-auto space-y-3">
                             <FileText className="w-8 h-8 text-indigo-400 mx-auto opacity-40" />
                             <div className="font-bold text-white text-sm">
@@ -1108,9 +1172,51 @@ export default function App() {
             </div>
 
             {submitError && (
-              <div className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-2xl text-xs text-rose-300 flex items-center gap-2.5">
-                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
-                <span>{submitError}</span>
+              <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-200 space-y-3 shadow-lg">
+                <div className="flex items-start gap-2.5">
+                  <AlertTriangle className="w-5 h-5 shrink-0 text-amber-400 mt-0.5" />
+                  <div className="space-y-1">
+                    <div className="font-bold text-amber-300 text-sm">
+                      {duplicateErrorTask ? '⚠️ Ссылка уже проверялась ранее!' : 'Ошибка отправки формы'}
+                    </div>
+                    <p className="text-xs text-indigo-200/90 leading-relaxed">{submitError}</p>
+                  </div>
+                </div>
+
+                {duplicateErrorTask && (
+                  <div className="bg-[#14102C] border border-amber-500/30 rounded-xl p-3.5 space-y-2.5 mt-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                      <div>
+                        <span className="text-indigo-400">Преподаватель: </span>
+                        <strong className="text-white">{duplicateErrorTask.teacherName}</strong>
+                      </div>
+                      <div>
+                        <span className="text-indigo-400">Дата проверки: </span>
+                        <span className="text-indigo-200 font-mono">{duplicateErrorTask.date}</span>
+                      </div>
+                      <div>
+                        <span className="text-indigo-400">Предмет: </span>
+                        <span className="text-indigo-200">{duplicateErrorTask.subject}</span>
+                      </div>
+                      <div>
+                        <span className="text-indigo-400">Оценка ИИ: </span>
+                        <strong className="text-emerald-400 font-mono">{duplicateErrorTask.totalScore} / 100</strong>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTab('dashboard');
+                        setActiveDetailTask(duplicateErrorTask);
+                      }}
+                      className="mt-1 w-full py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Search className="w-3.5 h-3.5" />
+                      <span>Открыть существующий результат проверки</span>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1156,25 +1262,44 @@ export default function App() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-bold text-white mb-1.5">
-                    2. Преподаватель:
+                  <label className="block text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
+                    <GraduationCap className="w-3.5 h-3.5 text-[#FF5252]" />
+                    <span>2. Преподаватель:</span>
                   </label>
-                  <select
-                    value={selectedTeacher}
-                    onChange={(e) => setSelectedTeacher(e.target.value)}
-                    className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-[#FF5252]"
-                  >
-                    {teachersList.map((t) => (
-                      <option key={t} value={t}>{t}</option>
-                    ))}
-                    <option value="__new__">+ Добавить нового преподавателя...</option>
-                  </select>
+                  <div className="relative">
+                    <select
+                      value={selectedTeacher}
+                      onChange={(e) => {
+                        setSelectedTeacher(e.target.value);
+                        if (e.target.value !== '__new__') {
+                          setNewTeacherName('');
+                        }
+                      }}
+                      className="w-full bg-[#14102C] border border-indigo-700/60 hover:border-indigo-500 rounded-xl px-3.5 py-3 text-xs text-white focus:outline-none focus:border-[#FF5252] transition-colors appearance-none cursor-pointer pr-8 shadow-inner"
+                    >
+                      {teachersList.length === 0 && (
+                        <option value="" disabled>Загрузка списка преподавателей...</option>
+                      )}
+                      {teachersList.map((t) => (
+                        <option key={t} value={t} className="bg-[#14102C] text-white py-1">
+                          👨‍🏫 {t}
+                        </option>
+                      ))}
+                      <option value="__new__" className="bg-[#1B153B] text-[#FF5252] font-bold py-1">
+                        ✨ + Добавить нового преподавателя...
+                      </option>
+                    </select>
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-indigo-400">
+                      ▼
+                    </div>
+                  </div>
                 </div>
 
                 {selectedTeacher === '__new__' && (
-                  <div>
-                    <label className="block text-xs font-bold text-white mb-1.5">
-                      ФИО нового преподавателя:
+                  <div className="animate-fade-in">
+                    <label className="block text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
+                      <UserPlus className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>ФИО нового преподавателя и предмет:</span>
                     </label>
                     <input
                       type="text"
@@ -1182,7 +1307,7 @@ export default function App() {
                       onChange={(e) => setNewTeacherName(e.target.value)}
                       placeholder="Иван Петров (Математика)"
                       required
-                      className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-2.5 text-xs text-white focus:outline-none focus:border-[#FF5252]"
+                      className="w-full bg-[#14102C] border border-emerald-500/50 rounded-xl px-4 py-3 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252] shadow-inner"
                     />
                   </div>
                 )}
@@ -1643,7 +1768,18 @@ export default function App() {
         )}
 
         {/* ======================================================== */}
-        {/* ВКЛАДКА 4: РЕДАКТОР ПРОМПТА ИИ (ТОЛЬКО ДЛЯ СТАРШИХ)      */}
+        {/* ВКЛАДКА 4: УПРАВЛЕНИЕ КРИТЕРИЯМИ (ТОЛЬКО СТАРШИЙ КУРАТОР) */}
+        {/* ======================================================== */}
+        {activeTab === 'criteria_manager' && isSenior && (
+          <CriteriaManager
+            authToken={authToken}
+            currentUserEmail={currentUser.email}
+            onConfigUpdated={fetchCriteriaConfig}
+          />
+        )}
+
+        {/* ======================================================== */}
+        {/* ВКЛАДКА 5: РЕДАКТОР ПРОМПТА ИИ (ТОЛЬКО ДЛЯ СТАРШИХ)      */}
         {/* ======================================================== */}
         {activeTab === 'prompt_editor' && isSenior && (
           <PromptEditor
@@ -1654,7 +1790,7 @@ export default function App() {
         )}
 
         {/* ======================================================== */}
-        {/* ВКЛАДКА 5: КРИТЕРИИ ОЦЕНКИ (21 + 8)                      */}
+        {/* ВКЛАДКА 6: КРИТЕРИИ ОЦЕНКИ (ДИНАМИЧЕСКИЙ СПИСОК)         */}
         {/* ======================================================== */}
         {activeTab === 'criteria' && (
           <div className="space-y-6 animate-fade-in">
@@ -1663,10 +1799,10 @@ export default function App() {
                 <div>
                   <h2 className="text-lg font-bold text-white flex items-center gap-2">
                     <ShieldCheck className="w-5 h-5 text-[#38BDF8]" />
-                    <span>21 стандартный педагогический критерий</span>
+                    <span>{dynamicStandardCriteria.length} стандартных педагогических критериев</span>
                   </h2>
                   <p className="text-xs text-indigo-300 mt-0.5">
-                    Официальный стандарт школы «Олимпиадные Практики»
+                    Официальный стандарт школы «Олимпиадные Практики» (Макс. балл: {dynamicStandardCriteria.length * 5})
                   </p>
                 </div>
 
@@ -1717,12 +1853,12 @@ export default function App() {
               </div>
             </div>
 
-            {/* 8 критических критериев */}
+            {/* Критические критерии */}
             <div className="bg-[#1B153B] border border-rose-500/30 rounded-3xl p-6 space-y-4 shadow-xl">
               <div className="border-b border-rose-500/20 pb-3">
                 <h3 className="text-base font-bold text-white flex items-center gap-2">
                   <AlertTriangle className="w-5 h-5 text-rose-400" />
-                  <span>8 критических нарушений (Обнуление оценки урока)</span>
+                  <span>{dynamicCriticalCriteria.length} критических нарушений (Обнуление оценки урока)</span>
                 </h3>
                 <p className="text-xs text-rose-200/80 mt-0.5">
                   При выявлении хотя бы одного из этих пунктов оценка за всё занятие снижается до 0 баллов
@@ -1730,7 +1866,7 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {CRITICAL_CRITERIA.map((crit) => (
+                {dynamicCriticalCriteria.map((crit) => (
                   <div key={crit.id} className="p-3.5 bg-[#14102C] border border-rose-900/40 rounded-2xl space-y-1">
                     <div className="text-xs font-bold text-rose-300 flex items-center gap-2">
                       <span className="w-4 h-4 rounded-full bg-rose-500/20 flex items-center justify-center font-mono text-[10px]">

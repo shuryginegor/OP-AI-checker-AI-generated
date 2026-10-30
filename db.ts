@@ -205,6 +205,13 @@ async function initTablesPG() {
       updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
       updated_by VARCHAR(255) NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS criteria_configs (
+      key VARCHAR(64) PRIMARY KEY,
+      criteria_json TEXT NOT NULL,
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      updated_by VARCHAR(255) NOT NULL
+    );
   `);
 }
 
@@ -277,6 +284,13 @@ async function initTablesSQLite() {
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_by TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS criteria_configs (
+      key TEXT PRIMARY KEY,
+      criteria_json TEXT NOT NULL,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_by TEXT NOT NULL
+    );
   `);
 }
 
@@ -299,6 +313,13 @@ async function seedInitialData() {
   } else {
     await updateCuratorRoleInDB(superAdminEmail, 'senior_curator');
     await updateCuratorStatusInDB(superAdminEmail, 'active');
+  }
+
+  // Автоматическая гидрация проверок лекций из бэкапа при старте
+  try {
+    await hydrateLectureTasksFromBackup();
+  } catch (e) {
+    console.warn('[БД] Ошибка восстановления проверок из бэкапа:', e);
   }
 }
 
@@ -634,6 +655,13 @@ export async function getLectureTasks(): Promise<LectureTaskRecord[]> {
     if (isPostgres && pgPool) {
       const res = await pgPool.query(`SELECT * FROM lecture_tasks ORDER BY created_at DESC`);
       for (const r of res.rows) {
+        const criteria = safeJsonParse(r.criteria_data, []);
+        let totalScore = r.total_score || 0;
+        if (totalScore === 0 && criteria.length > 0) {
+          const maxPts = criteria.length * 5;
+          const earned = criteria.reduce((sum: number, c: any) => sum + (c.score || 0), 0);
+          totalScore = Math.min(100, Math.max(0, Math.round((earned / maxPts) * 100)));
+        }
         dbTasksMap.set(r.id, {
           id: r.id,
           lectureUrl: r.lecture_url,
@@ -641,14 +669,14 @@ export async function getLectureTasks(): Promise<LectureTaskRecord[]> {
           subject: r.subject || '',
           groupName: r.group_name || '',
           date: r.date || '',
-          totalScore: r.total_score || 0,
+          totalScore,
           status: r.status,
           progressPct: r.progress_pct || 0,
           curatorEmail: r.curator_email,
           criticalViolations: safeJsonParse(r.critical_violations, []),
           positiveHighlights: safeJsonParse(r.positive_highlights, []),
           recommendations: safeJsonParse(r.recommendations, []),
-          criteria: safeJsonParse(r.criteria_data, []),
+          criteria,
           createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString()
         });
       }
@@ -656,6 +684,13 @@ export async function getLectureTasks(): Promise<LectureTaskRecord[]> {
       const stmt = sqliteDb.prepare(`SELECT * FROM lecture_tasks ORDER BY created_at DESC`);
       const rows = stmt.all() as any[];
       for (const r of rows) {
+        const criteria = safeJsonParse(r.criteria_data, []);
+        let totalScore = r.total_score || 0;
+        if (totalScore === 0 && criteria.length > 0) {
+          const maxPts = criteria.length * 5;
+          const earned = criteria.reduce((sum: number, c: any) => sum + (c.score || 0), 0);
+          totalScore = Math.min(100, Math.max(0, Math.round((earned / maxPts) * 100)));
+        }
         dbTasksMap.set(r.id, {
           id: r.id,
           lectureUrl: r.lecture_url,
@@ -663,14 +698,14 @@ export async function getLectureTasks(): Promise<LectureTaskRecord[]> {
           subject: r.subject || '',
           groupName: r.group_name || '',
           date: r.date || '',
-          totalScore: r.total_score || 0,
+          totalScore,
           status: r.status,
           progressPct: r.progress_pct || 0,
           curatorEmail: r.curator_email,
           criticalViolations: safeJsonParse(r.critical_violations, []),
           positiveHighlights: safeJsonParse(r.positive_highlights, []),
           recommendations: safeJsonParse(r.recommendations, []),
-          criteria: safeJsonParse(r.criteria_data, []),
+          criteria,
           createdAt: r.created_at || new Date().toISOString()
         });
       }
@@ -687,6 +722,13 @@ export async function getLectureTasks(): Promise<LectureTaskRecord[]> {
   }
 
   return Array.from(dbTasksMap.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function getLectureTaskByUrl(rawUrl: string): Promise<LectureTaskRecord | null> {
+  if (!rawUrl || !rawUrl.trim()) return null;
+  const normTarget = rawUrl.trim().toLowerCase().replace(/\/+$/, '');
+  const allTasks = await getLectureTasks();
+  return allTasks.find(t => t.lectureUrl && t.lectureUrl.trim().toLowerCase().replace(/\/+$/, '') === normTarget) || null;
 }
 
 export async function insertLectureTask(task: LectureTaskRecord): Promise<boolean> {
@@ -811,11 +853,11 @@ export async function getTeachersFromDB(): Promise<string[]> {
   try {
     if (isPostgres && pgPool) {
       const res = await pgPool.query(`SELECT name FROM teachers ORDER BY name ASC`);
-      return res.rows.map(r => r.name);
+      return res.rows.map(r => r.name).filter(Boolean);
     } else if (sqliteDb) {
       const stmt = sqliteDb.prepare(`SELECT name FROM teachers ORDER BY name ASC`);
       const rows = stmt.all() as any[];
-      return rows.map(r => r.name);
+      return rows.map(r => r.name).filter(Boolean);
     }
   } catch (err) {
     console.error('[БД] Ошибка чтения teachers:', err);
@@ -1001,4 +1043,108 @@ export async function getPromptConfigFromDB(key: string): Promise<string | null>
   }
   return null;
 }
+
+// -------------------------------------------------------------
+// 11. СОХРАНЕНИЕ КРИТЕРИЕВ ОЦЕНКИ В БД
+// -------------------------------------------------------------
+export async function saveCriteriaConfigInDB(key: string, criteriaData: any, updatedBy: string): Promise<void> {
+  try {
+    const criteriaJson = JSON.stringify(criteriaData);
+    if (isPostgres && pgPool) {
+      await pgPool.query(
+        `INSERT INTO criteria_configs (key, criteria_json, updated_at, updated_by)
+         VALUES ($1, $2, CURRENT_TIMESTAMP, $3)
+         ON CONFLICT (key) DO UPDATE SET criteria_json = $2, updated_at = CURRENT_TIMESTAMP, updated_by = $3`,
+        [key, criteriaJson, updatedBy]
+      );
+    } else if (sqliteDb) {
+      const stmt = sqliteDb.prepare(
+        `INSERT INTO criteria_configs (key, criteria_json, updated_at, updated_by)
+         VALUES (?, ?, datetime('now'), ?)
+         ON CONFLICT (key) DO UPDATE SET criteria_json = excluded.criteria_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`
+      );
+      stmt.run(key, criteriaJson, updatedBy);
+    }
+  } catch (err) {
+    console.error('[БД] Ошибка сохранения критериев в БД:', err);
+  }
+}
+
+export async function getCriteriaConfigFromDB(key: string = 'active'): Promise<any | null> {
+  try {
+    if (isPostgres && pgPool) {
+      const res = await pgPool.query(`SELECT criteria_json FROM criteria_configs WHERE key = $1 LIMIT 1`, [key]);
+      if (res.rows.length > 0) return JSON.parse(res.rows[0].criteria_json);
+    } else if (sqliteDb) {
+      const stmt = sqliteDb.prepare(`SELECT criteria_json FROM criteria_configs WHERE key = ? LIMIT 1`);
+      const row = stmt.get(key) as any;
+      if (row) return JSON.parse(row.criteria_json);
+    }
+  } catch (err) {
+    console.error('[БД] Ошибка чтения критериев из БД:', err);
+  }
+  return null;
+}
+
+// -------------------------------------------------------------
+// 12. АВТОМАТИЧЕСКИЙ БЭКАП И ГИДРАЦИЯ ПРОВЕРОК ЛЕКЦИЙ
+// -------------------------------------------------------------
+const BACKUP_FILE = path.join(DATA_DIR, 'lecture_tasks_backup.json');
+
+export async function createLectureTasksBackup(): Promise<number> {
+  try {
+    const tasks = await getLectureTasks();
+    // Ограничиваем бэкап ровно до 100 самых последних проверок (старые вытесняются новым)
+    const recentTasks = tasks.slice(0, 100);
+    const tempFile = path.join(DATA_DIR, 'lecture_tasks_backup.tmp.json');
+    fs.writeFileSync(tempFile, JSON.stringify(recentTasks, null, 2), 'utf-8');
+    fs.renameSync(tempFile, BACKUP_FILE);
+    console.log(`[БД Бэкап] ✅ Автоматически сохранен бэкап проверок лекций (${recentTasks.length} записей, ротация ровно до 100) в ${BACKUP_FILE}`);
+    return recentTasks.length;
+  } catch (err) {
+    console.error('[БД Бэкап] Ошибка создания бэкапа проверок лекций:', err);
+    return 0;
+  }
+}
+
+export async function hydrateLectureTasksFromBackup(): Promise<number> {
+  if (!fs.existsSync(BACKUP_FILE)) {
+    console.log('[БД Гидрация] Файл бэкапа не найден, гидрация пропущена.');
+    return 0;
+  }
+
+  try {
+    const raw = fs.readFileSync(BACKUP_FILE, 'utf-8');
+    const backupTasks: LectureTaskRecord[] = JSON.parse(raw);
+    if (!Array.isArray(backupTasks) || backupTasks.length === 0) {
+      return 0;
+    }
+
+    const currentTasks = await getLectureTasks();
+    const currentIds = new Set(currentTasks.map(t => t.id));
+
+    let restoredCount = 0;
+    for (const task of backupTasks) {
+      if (task.id && !currentIds.has(task.id)) {
+        await insertLectureTask(task);
+        if (task.teacherName) {
+          await insertTeacherIfNotExists(task.teacherName, task.subject);
+        }
+        restoredCount++;
+      }
+    }
+
+    if (restoredCount > 0) {
+      console.log(`[БД Гидрация] ✅ Восстановлено ${restoredCount} проверок лекций из резервной копии ${BACKUP_FILE}`);
+    } else {
+      console.log(`[БД Гидрация] Все ${backupTasks.length} проверок уже присутствуют в базе данных.`);
+    }
+
+    return restoredCount;
+  } catch (err) {
+    console.error('[БД Гидрация] Ошибка гидрации проверок из бэкапа:', err);
+    return 0;
+  }
+}
+
 

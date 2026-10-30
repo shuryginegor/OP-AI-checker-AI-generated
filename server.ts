@@ -18,6 +18,7 @@ import {
   updateCuratorStatusInDB,
   touchCuratorLoginInDB,
   getLectureTasks,
+  getLectureTaskByUrl,
   insertLectureTask,
   updateLectureTaskProgressInDB,
   getTeachersFromDB,
@@ -28,6 +29,10 @@ import {
   getAuditLogs,
   savePromptConfigInDB,
   getPromptConfigFromDB,
+  saveCriteriaConfigInDB,
+  getCriteriaConfigFromDB,
+  createLectureTasksBackup,
+  hydrateLectureTasksFromBackup,
   purgeDatabaseToCleanState,
   CuratorRecord,
   LectureTaskRecord
@@ -41,6 +46,11 @@ async function startServer() {
   console.log("[Инициализация] Подключение к реляционной базе данных...");
   try {
     await initDatabase();
+    // Фоновое регулярное сохранение бэкапа проверок лекций в data/ каждые 60 минут
+    await createLectureTasksBackup();
+    setInterval(() => {
+      createLectureTasksBackup().catch(err => console.error("[Авто-Бэкап] Ошибка создания ежечасной копии:", err));
+    }, 60 * 60 * 1000);
   } catch (dbErr) {
     console.error("[Инициализация] Критическая ошибка БД:", dbErr);
   }
@@ -439,10 +449,45 @@ async function startServer() {
       return res.status(400).json({ success: false, message: "Выберите или введите ФИО преподавателя." });
     }
 
+    const cleanUrl = lectureUrl.trim();
+    const existingTask = await getLectureTaskByUrl(cleanUrl);
+    if (existingTask) {
+      await logAuditEvent(
+        currentUser.email,
+        currentUser.role,
+        "DUPLICATE_URL_SUBMIT_BLOCKED",
+        existingTask.id,
+        `Попытка повторной отправки встречи КТалк: ${cleanUrl} (Преподаватель: ${existingTask.teacherName})`,
+        ip
+      );
+      return res.status(400).json({
+        success: false,
+        code: "DUPLICATE_URL",
+        message: `Эта ссылка на занятие КТалк уже проверялась ранее (Преподаватель: ${existingTask.teacherName}, Дата: ${existingTask.date}).`,
+        existingTask
+      });
+    }
+
     const taskId = `lec_${Date.now()}`;
     const cleanTeacher = teacherName.trim();
     const cleanSubject = (subject || "Олимпиадная подготовка").trim();
     const cleanGroup = (groupName || "Основная группа").trim();
+
+    const activeCriteriaConfig = await getCriteriaConfigFromDB("active");
+    const activeCriteriaList = (activeCriteriaConfig && Array.isArray(activeCriteriaConfig.standardCriteria) && activeCriteriaConfig.standardCriteria.length > 0)
+      ? activeCriteriaConfig.standardCriteria
+      : STANDARD_CRITERIA_LIST;
+
+    const initialCriteria = activeCriteriaList.map((c: any) => ({
+      id: c.id,
+      text: c.text,
+      category: c.category,
+      passed: true,
+      score: 5
+    }));
+    const maxPts = initialCriteria.length * 5;
+    const earned = initialCriteria.reduce((sum: number, c: any) => sum + c.score, 0);
+    const initialScore = maxPts > 0 ? Math.min(100, Math.max(0, Math.round((earned / maxPts) * 100))) : 100;
 
     // Создаем запись задачи
     const newTask: LectureTaskRecord = {
@@ -452,17 +497,11 @@ async function startServer() {
       subject: cleanSubject,
       groupName: cleanGroup,
       date: new Date().toISOString().replace("T", " ").slice(0, 16),
-      totalScore: 0,
+      totalScore: initialScore,
       criticalViolations: [],
       positiveHighlights: [],
       recommendations: [],
-      criteria: STANDARD_CRITERIA_LIST.map(c => ({
-        id: c.id,
-        text: c.text,
-        category: c.category,
-        passed: true,
-        score: 5
-      })),
+      criteria: initialCriteria,
       status: "downloading",
       progressPct: 15,
       curatorEmail: currentUser.email,
@@ -509,14 +548,18 @@ async function startServer() {
         try {
           if (step.status === "completed") {
             const seed = Date.now();
-            const criteria = generateSampleCriteria(seed, false, subject, teacherName);
+            const criteriaConfig = await getCriteriaConfigFromDB("active");
+            const activeCriteriaList = (criteriaConfig && Array.isArray(criteriaConfig.standardCriteria) && criteriaConfig.standardCriteria.length > 0)
+              ? criteriaConfig.standardCriteria
+              : STANDARD_CRITERIA_LIST;
+            const criteria = generateSampleCriteria(seed, false, subject, teacherName, activeCriteriaList);
             const failedCriteria = criteria.filter(c => !c.passed);
             const passedCriteria = criteria.filter(c => c.passed);
 
-            // Честный расчет балла на основе суммы оценок по всем 21 критериям
-            const maxPoints = criteria.length * 5; // 105
+            // Честный расчет балла на основе суммы оценок по всем критериям
+            const maxPoints = criteria.length * 5;
             const earnedPoints = criteria.reduce((sum, c) => sum + (c.score || 0), 0);
-            const score = Math.min(100, Math.max(60, Math.round((earnedPoints / maxPoints) * 100)));
+            const score = maxPoints > 0 ? Math.min(100, Math.max(60, Math.round((earnedPoints / maxPoints) * 100))) : 100;
 
             const positiveHighlights = passedCriteria.slice(0, 3).map(c => c.comment || c.text);
             const recommendations = failedCriteria.length > 0
@@ -533,6 +576,9 @@ async function startServer() {
               recommendations,
               criteria
             );
+
+            // Мгновенный дублирующий бэкап при появлении новой завершенной проверки
+            await createLectureTasksBackup();
 
             // Записываем завершение анализа в audit_logs БД
             await logAuditEvent(
@@ -651,33 +697,95 @@ async function startServer() {
   // 5. РЕДАКТОР ПРОМПТА ИИ (ТОЛЬКО ДЛЯ СТАРШИХ КУРАТОРОВ)
   // -------------------------------------------------------------
 
-  app.get("/api/prompt/data", requireAuth, requireSeniorCurator, (req, res) => {
-    execFile("python3", ["prompt_manager.py", "get_data"], { encoding: "utf-8" }, async (err, stdout, stderr) => {
-      if (err) {
-        console.error("Ошибка prompt_manager get_data:", err, stderr);
-        // Fallback: читаем сохраненный в БД или на диске
-        const dbPrompt = await getPromptConfigFromDB("active");
-        if (dbPrompt) {
-          return res.json({
-            active: dbPrompt,
-            base: dbPrompt,
-            factory: "Промпт по умолчанию",
-            has_unsaved_changes: false
-          });
+  const DEFAULT_FACTORY_PROMPT = `Ты — строгий, бескомпромиссный главный методист и старший эксперт по контролю качества онлайн-занятий.
+Твоя задача — провести ПРЕДЕЛЬНО ДЕТАЛЬНЫЙ, КРИТИЧЕСКИЙ И ПРИДИРЧИВЫЙ аудит предоставленного занятия.
+Не сглаживай углы, не будь излишне вежливым, фиксируй ВСЕ недочёты, нарушения дисциплины, панибратство, технические сбои и методические огрехи.
+
+КРИТИЧЕСКИ ВАЖНО — ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ ОТ ПОЛЬЗОВАТЕЛЯ:
+"{additional_info}"
+Эта информация определяет реальный формат, целевую аудиторию и контекст занятия.
+Если критерий противоречит явно указанному формату (например, запись лекции без учеников, а критерий требует работы с классом), ставь в поле \`score\` значение \`null\`.
+
+СПИСОК НЕКРИТИЧЕСКИХ КРИТЕРИЕВ ДЛЯ ОЦЕНИВАНИЯ:
+{standard_formatted}
+
+СТРОГИЕ ПРАВИЛА ВЫСТАВЛЕНИЯ ШТРАФНЫХ БАЛЛОВ ПО КАЖДОМУ КРИТЕРИЮ:
+По каждому критерию определи количество СНЯТЫХ баллов (\`score\`):
+• 0 — ИДЕАЛЬНО / ПОЛНОЕ ОТСУТСТВИЕ НАРУШЕНИЙ (0 баллов снимается). Ставь 0 ТОЛЬКО если на протяжении ВСЕГО урока по этому критерию нет НИ ЕДИНОГО замечания.
+• 1 — НЕБОЛЬШОЕ ИЛИ ЕДИНИЧНОЕ НАРУШЕНИЕ (снимается 1 балл). Если был хотя бы один эпизод отклонения (например: неформальный флуд, посторонний голос на фоне, единичный поиск файла, игнорирование молчащего ученика, отсутствие ДЗ).
+• 2 — СИСТЕМАТИЧЕСКОЕ ИЛИ ГРУБОЕ НАРУШЕНИЕ (снимается 2 балла). Если проблема повторялась регулярно, заняла существенную часть урока или существенно снизила пользу занятия.
+• null — КРИТЕРИЙ НЕ ПРИМЕНИМ из-за формата/специфики урока или информации от пользователя.
+
+ОБЯЗАТЕЛЬНОЕ ОБОСНОВАНИЕ В ПОЛЕ \`details\`:
+Ты ОБЯЗАН предоставить развёрнутое пояснение в поле \`details\`:
+1. Если \`score\` равен 1 или 2 — укажи точную причину снятия баллов с таймкодами нарушений.
+2. Если \`score\` равен \`null\` (критерий исключён/удалён из списка) — ОБЯЗАТЕЛЬНО укажи конкретную причину его неприменимости (например: "Формат занятия — запись лекции без участников, поэтому критерий взаимодействия с группой исключён").
+
+ОСОБЫЕ АКЦЕНТЫ ПРИ АНАЛИЗЕ (НЕ ПРОПУСКАТЬ!):
+- Критерий 2 и 17: Любые задержки с демонстрацией, поиск файлов, отправка пустых файлов, отсутствие слайдов/плана -> ОБЯЗАТЕЛЬНО снимать баллы!
+- Критерий 7 и 11: Преподаватель работает только с 1-2 активными (а остальные молчат или уходят без внимания) -> ОБЯЗАТЕЛЬНО снимать баллы!
+- Критерий 10 и 21: Панибратство, обсуждение посторонних людей, личных тем, флуд в чате/голосом, шутки учеников (например "найду по IP"), посторонние лица на фоне -> ОБЯЗАТЕЛЬНО снимать баллы!
+- Критерий 12 и 13: Невыдача домашнего задания, отсутствие закрепления -> ОБЯЗАТЕЛЬНО фиксировать и снижать балл!
+
+СПИСОК КРИТИЧЕСКИХ НАРУШЕНИЙ:
+{critical_formatted}
+
+ПРАВИЛО КРИТИЧНОСТИ:
+1. Проверь занятие на ВСЕ КРИТИЧЕСКИЕ НАРУШЕНИЯ. Если есть хотя бы одно — \`is_critical: true\` и перечисли их в \`critical_details\` с точными таймкодами.
+2. В поле \`point\` укажи сумму всех СНЯТЫХ баллов (суммарный штраф).
+
+ТРЕБОВАНИЯ К КОММЕНТАРИЮ И РЕКОМЕНДАЦИЯМ:
+• В поле \`comment\` напиши развернутый экспертный разбор (10-15 предложений) в хронологическом порядке: подробно распиши все замеченные недостатки, срыв тайминга, флуд, технические задержки, работу с учениками ОБЯЗАТЕЛЬНО С ТОЧНЫМИ ТАЙМКОДАМИ вида (ЧЧ:ММ:СС или ММ:СС).
+• В поле \`recommendations\` напиши ровно 5 четких, конкретных рекомендаций преподавателю, как устранить эти недостатки.`;
+
+  app.get("/api/prompt/data", requireAuth, requireSeniorCurator, async (req, res) => {
+    try {
+      let activePrompt = await getPromptConfigFromDB("active");
+      let basePrompt = await getPromptConfigFromDB("base");
+
+      if (!activePrompt) {
+        const activePath = path.join(process.cwd(), "data", "prompt_active.txt");
+        const sysActivePath = path.join(process.cwd(), "data", "system_prompt_active.txt");
+        if (fs.existsSync(activePath)) {
+          activePrompt = fs.readFileSync(activePath, "utf-8").trim();
+        } else if (fs.existsSync(sysActivePath)) {
+          activePrompt = fs.readFileSync(sysActivePath, "utf-8").trim();
         }
-        return res.status(500).json({ success: false, message: "Ошибка сервера при чтении промптов." });
       }
-      try {
-        const raw = stdout.trim();
-        const startIdx = raw.indexOf("{");
-        const endIdx = raw.lastIndexOf("}");
-        const data = JSON.parse(raw.substring(startIdx, endIdx + 1));
-        return res.json(data);
-      } catch (e) {
-        console.error("Ошибка парсинга вывода Python:", stdout, e);
-        return res.status(500).json({ success: false, message: "Ошибка сервера." });
+
+      if (!basePrompt) {
+        const basePath = path.join(process.cwd(), "data", "prompt_base.txt");
+        const sysBasePath = path.join(process.cwd(), "data", "system_prompt_base.txt");
+        if (fs.existsSync(basePath)) {
+          basePrompt = fs.readFileSync(basePath, "utf-8").trim();
+        } else if (fs.existsSync(sysBasePath)) {
+          basePrompt = fs.readFileSync(sysBasePath, "utf-8").trim();
+        }
       }
-    });
+
+      const finalActive = activePrompt || DEFAULT_FACTORY_PROMPT;
+      const finalBase = basePrompt || DEFAULT_FACTORY_PROMPT;
+      const auditLogs = await getAuditLogs(30);
+
+      res.json({
+        success: true,
+        active: finalActive,
+        base: finalBase,
+        factory: DEFAULT_FACTORY_PROMPT,
+        audit_logs: auditLogs,
+        has_unsaved_changes: false
+      });
+    } catch (err) {
+      console.error("[Prompt API] Ошибка получения данных промпта:", err);
+      res.json({
+        success: true,
+        active: DEFAULT_FACTORY_PROMPT,
+        base: DEFAULT_FACTORY_PROMPT,
+        factory: DEFAULT_FACTORY_PROMPT,
+        audit_logs: [],
+        has_unsaved_changes: false
+      });
+    }
   });
 
   // Запрос кода подтверждения для сохранения промпта (на email старшего куратора)
@@ -773,6 +881,123 @@ async function startServer() {
     res.json({
       success: true,
       message: "Системный промпт нейросети успешно обновлен старшим куратором и зафиксирован в БД!"
+    });
+  });
+
+  // -------------------------------------------------------------
+  // 6. УПРАВЛЕНИЕ КРИТЕРИЯМИ ОЦЕНКИ (ТОЛЬКО ДЛЯ СТАРШИХ КУРАТОРОВ)
+  // -------------------------------------------------------------
+
+  const DEFAULT_CRITICAL_CRITERIA_LIST = [
+    { id: 1, title: "Фактическая или методическая ошибка", desc: "Серьезная ошибка в теории или решении, оставшаяся без исправления." },
+    { id: 2, title: "Некорректное общение", desc: "Грубое, унизительное или дискриминирующее общение с учеником." },
+    { id: 3, title: "Некомпетентность в задаче", desc: "Преподаватель не владеет решением рассматриваемой задачи и не может закончить разбор." },
+    { id: 4, title: "Игнорирование учеников", desc: "Систематическое игнорирование вопросов и явных признаков непонимания группы." },
+    { id: 5, title: "Срыв тайминга из-за неподготовленности", desc: "Значительная часть занятия потрачена на организационные или технические действия." },
+    { id: 6, title: "Утечка конфиденциальных данных", desc: "Демонстрация персональных данных, личной переписки или приватной информации." },
+    { id: 7, title: "Заведомо ложный материал", desc: "Выдача заведомо неверного ответа, правила или алгоритма без исправления." },
+    { id: 8, title: "Длительное отсутствие", desc: "Отсутствие преподавателя или учебной работы в течение значительной части занятия." }
+  ];
+
+  app.get("/api/criteria/config", requireAuth, async (req, res) => {
+    try {
+      const savedConfig = await getCriteriaConfigFromDB("active");
+      if (savedConfig && Array.isArray(savedConfig.standardCriteria) && Array.isArray(savedConfig.criticalCriteria)) {
+        return res.json({
+          success: true,
+          standardCriteria: savedConfig.standardCriteria,
+          criticalCriteria: savedConfig.criticalCriteria,
+          updatedAt: savedConfig.updatedAt || null,
+          updatedBy: savedConfig.updatedBy || null
+        });
+      }
+      return res.json({
+        success: true,
+        standardCriteria: STANDARD_CRITERIA_LIST,
+        criticalCriteria: DEFAULT_CRITICAL_CRITERIA_LIST,
+        updatedAt: null,
+        updatedBy: null
+      });
+    } catch (err) {
+      console.error("[Criteria API] Ошибка загрузки критериев:", err);
+      res.json({
+        success: true,
+        standardCriteria: STANDARD_CRITERIA_LIST,
+        criticalCriteria: DEFAULT_CRITICAL_CRITERIA_LIST,
+        updatedAt: null,
+        updatedBy: null
+      });
+    }
+  });
+
+  // Запрос 2FA-кода на почту Senior Curator для сохранения критериев
+  app.post("/api/criteria/request-save-code", requireAuth, requireSeniorCurator, async (req, res) => {
+    const ip = getClientIp(req);
+    const user: CuratorRecord = (req as any).user;
+    const { standardCount, criticalCount } = req.body;
+
+    const actionDesc = `Сохранение изменений критериев оценки (${standardCount || 0} стандартных, ${criticalCount || 0} критических)`;
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+
+    await storeOTPInDB(user.email, code, "criteria_save", expiresAt);
+
+    await logAuditEvent(
+      user.email,
+      user.role,
+      "CRITERIA_SAVE_REQUESTED",
+      "criteria_config",
+      `Запрошен одноразовый код для сохранения изменений в критериях оценки`,
+      ip
+    );
+
+    const emailResult = await sendOTPEmail(user.email, code, "criteria_save", actionDesc);
+
+    res.json({
+      success: true,
+      message: `Код подтверждения отправлен на вашу почту ${user.email}.`,
+      sent_via_smtp: emailResult.sent,
+      from_email: emailResult.from
+    });
+  });
+
+  // Подтверждение и сохранение критериев
+  app.post("/api/criteria/confirm-save", requireAuth, requireSeniorCurator, async (req, res) => {
+    const ip = getClientIp(req);
+    const user: CuratorRecord = (req as any).user;
+    const { code, standardCriteria, criticalCriteria } = req.body;
+
+    if (!Array.isArray(standardCriteria) || !Array.isArray(criticalCriteria)) {
+      return res.status(400).json({ success: false, message: "Некорректный формат списков критериев." });
+    }
+
+    const verification = await verifyOTPFromDB(user.email, code || "", "criteria_save");
+    if (!verification.valid) {
+      await logAuditEvent(user.email, user.role, "CRITERIA_SAVE_FAILED", "criteria_config", verification.message, ip);
+      return res.status(400).json({ success: false, message: verification.message });
+    }
+
+    const criteriaData = {
+      standardCriteria,
+      criticalCriteria,
+      updatedAt: new Date().toISOString(),
+      updatedBy: user.email
+    };
+
+    await saveCriteriaConfigInDB("active", criteriaData, user.email);
+
+    await logAuditEvent(
+      user.email,
+      user.role,
+      "CRITERIA_UPDATED_CONFIRMED",
+      "criteria_config",
+      `Критерии оценки успешно обновлены старшим куратором ${user.fullName} (${standardCriteria.length} стандартных, ${criticalCriteria.length} критических)`,
+      ip
+    );
+
+    res.json({
+      success: true,
+      message: `Критерии оценки успешно обновлены и зафиксированы в базе данных! (${standardCriteria.length} стандартных, ${criticalCriteria.length} критических)`
     });
   });
 
