@@ -486,7 +486,7 @@ async function startServer() {
     );
 
     // Запускаем асинхронную обработку в БД с обновлением прогресса
-    runTaskPipelineInDB(taskId, cleanTeacher);
+    runTaskPipelineInDB(taskId, cleanTeacher, cleanSubject);
 
     res.json({
       success: true,
@@ -496,7 +496,7 @@ async function startServer() {
   });
 
   // Вспомогательная функция обработки задачи с обновлением прогресса в БД
-  function runTaskPipelineInDB(taskId: string, teacherName: string) {
+  function runTaskPipelineInDB(taskId: string, teacherName: string, subject: string = '') {
     const steps = [
       { delay: 3000, status: "downloading" as const, pct: 35 },
       { delay: 7000, status: "extracting" as const, pct: 65 },
@@ -508,16 +508,20 @@ async function startServer() {
       setTimeout(async () => {
         try {
           if (step.status === "completed") {
-            const score = Math.floor(86 + Math.random() * 12); // 86..98
-            const positiveHighlights = [
-              "Высокий темп занятия и отличное владение математическим аппаратом.",
-              "Грамотная раскадровка и читаемые формулы на доске без размытия.",
-              "Активное взаимодействие с аудиторией в чате КТалк, разбор встречных вопросов."
-            ];
-            const recommendations = [
-              "Рекомендуется в начале занятия четче артикулировать тайминг и план урока на первые 45 минут."
-            ];
-            const criteria = generateSampleCriteria(Date.now(), score >= 90);
+            const seed = Date.now();
+            const criteria = generateSampleCriteria(seed, false, subject, teacherName);
+            const failedCriteria = criteria.filter(c => !c.passed);
+            const passedCriteria = criteria.filter(c => c.passed);
+
+            // Честный расчет балла на основе суммы оценок по всем 21 критериям
+            const maxPoints = criteria.length * 5; // 105
+            const earnedPoints = criteria.reduce((sum, c) => sum + (c.score || 0), 0);
+            const score = Math.min(100, Math.max(60, Math.round((earnedPoints / maxPoints) * 100)));
+
+            const positiveHighlights = passedCriteria.slice(0, 3).map(c => c.comment || c.text);
+            const recommendations = failedCriteria.length > 0
+              ? failedCriteria.map(c => `По критерию «${c.category}» (№${c.id}): ${c.comment}`)
+              : ["Занятие проведено на высочайшем методическом уровне, критических замечаний нет."];
 
             // Сохраняем финальные результаты анализа в БД
             await updateLectureTaskProgressInDB(
@@ -536,7 +540,7 @@ async function startServer() {
               "system",
               "TASK_ANALYSIS_COMPLETED",
               taskId,
-              `Успешно завершен анализ занятия преподавателя ${teacherName}. Оценка ИИ: ${score}/100. Критических нарушений: 0`,
+              `Успешно завершен анализ занятия преподавателя ${teacherName} (${subject || 'Олимпиадная подготовка'}). Оценка ИИ: ${score}/100. Замечаний: ${failedCriteria.length}`,
               "127.0.0.1"
             );
           } else {

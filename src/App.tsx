@@ -435,6 +435,9 @@ export default function App() {
 
       setSubmitSuccessTask(data.task);
       setLectureUrl('');
+      setTasks(prev => [data.task, ...prev.filter(t => t.id !== data.task.id)]);
+      setActiveTab('dashboard');
+      setActiveDetailTask(data.task);
       await fetchTasksAndTeachers();
     } catch (err: any) {
       setSubmitError(err.message || 'Сбой подключения к серверу.');
@@ -582,12 +585,16 @@ export default function App() {
 
   // Фильтрация уроков в дашборде
   const filteredTasks = tasks.filter(t => {
+    if (!t) return false;
     const matchesTeacher = selectedTeacherFilter === 'all' || t.teacherName === selectedTeacherFilter;
-    const matchesSearch =
-      (t.teacherName && t.teacherName.toLowerCase().includes(searchQuery.toLowerCase())) ||
-      (t.subject && t.subject.toLowerCase().includes(searchQuery.toLowerCase())) ||
-      (t.lectureUrl && t.lectureUrl.toLowerCase().includes(searchQuery.toLowerCase()));
-    return matchesTeacher && matchesSearch;
+    if (!matchesTeacher) return false;
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase().trim();
+    return (
+      (t.teacherName || '').toLowerCase().includes(q) ||
+      (t.subject || '').toLowerCase().includes(q) ||
+      (t.lectureUrl || '').toLowerCase().includes(q)
+    );
   });
 
   const categories = ['all', ...Array.from(new Set(STANDARD_CRITERIA.map(c => c.category)))];
@@ -1222,6 +1229,75 @@ export default function App() {
                 </button>
               </div>
             </form>
+
+            {/* Недавние проверки прямо под формой */}
+            {tasks.length > 0 && (
+              <div className="bg-[#1B153B] border border-indigo-800/50 rounded-3xl p-6 space-y-4 shadow-xl">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-[#FF5252]" />
+                    <span>Последние отправленные занятия ({tasks.slice(0, 5).length})</span>
+                  </h3>
+                  <button
+                    onClick={() => setActiveTab('dashboard')}
+                    className="text-xs text-[#FF5252] hover:text-white font-semibold transition-colors flex items-center gap-1"
+                  >
+                    <span>Перейти в полный дашборд</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div className="space-y-2.5">
+                  {tasks.slice(0, 5).map((t) => (
+                    <div
+                      key={t.id}
+                      onClick={() => {
+                        setActiveTab('dashboard');
+                        setActiveDetailTask(t);
+                      }}
+                      className="bg-[#14102C] hover:bg-[#241E4F]/60 border border-indigo-900/40 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 transition-colors cursor-pointer group"
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-white text-xs">{t.teacherName}</span>
+                          <span className="text-[10px] text-indigo-300 bg-indigo-900/40 px-2 py-0.5 rounded-full border border-indigo-700/30">
+                            {t.subject}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-indigo-400 truncate max-w-md">
+                          {t.lectureUrl}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-4 w-full sm:w-auto justify-between sm:justify-end">
+                        {t.status === 'completed' ? (
+                          <span className="px-3 py-1 rounded-xl font-mono font-bold text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            {t.totalScore} / 100
+                          </span>
+                        ) : (
+                          <div className="space-y-1 w-32">
+                            <div className="flex items-center gap-1.5 text-[10px] text-[#38BDF8]">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              <span>{t.progressPct}% • {t.status === 'downloading' ? 'Загрузка...' : t.status === 'extracting' ? 'Нарезка...' : 'ИИ-анализ...'}</span>
+                            </div>
+                            <div className="w-full bg-indigo-950 h-1.5 rounded-full overflow-hidden">
+                              <div
+                                className="bg-[#38BDF8] h-full transition-all duration-500"
+                                style={{ width: `${t.progressPct}%` }}
+                              ></div>
+                            </div>
+                          </div>
+                        )}
+                        <span className="text-xs text-[#FF5252] group-hover:text-white font-semibold flex items-center gap-0.5">
+                          <span>Карточка</span>
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
