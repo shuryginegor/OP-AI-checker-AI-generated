@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lecture-ai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres_password}
+      POSTGRES_DB: ${DB_NAME:-lecture_db}
+    volumes:
+      # Постоянное хранилище базы данных PostgreSQL на хосте
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Доступ к PostgreSQL открыт только локально на сервере (для бэкапов), не в интернет
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-lecture_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lecture-ai-checker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_TYPE=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres_password}
+      - DB_NAME=${DB_NAME:-lecture_db}
+      - TOKEN_SECRET=${TOKEN_SECRET:-olymp-secret-key-2026-checker-secret-secure-salt-2026}
+      - ADMIN_USERNAMES=${ADMIN_USERNAMES:-shurygin_egor,aemss72}
+      - PROMPT_ADMIN_USERNAMES=${PROMPT_ADMIN_USERNAMES:-shurygin_egor,aemss72}
+      - TALK_API_KEY=${TALK_API_KEY}
+      - GIGACHAT_CREDENTIALS=${GIGACHAT_CREDENTIALS}
+      - GIGACHAT_SCOPE=${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
+      - GIGACHAT_MODEL=${GIGACHAT_MODEL:-GigaChat-2-Pro}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_SECURE=${SMTP_SECURE:-true}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TESTING_MODE=${TESTING_MODE:-false}
+    volumes:
+      # Постоянное хранилище текстов промптов, кураторов и задач
+      - ./data:/app/data
+      # Временная папка для нарезки видео (очищается воркером)
+      - ./temp_lectures:/app/temp_lectures
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  postgres_data:

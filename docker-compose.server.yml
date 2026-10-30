@@ -1,0 +1,94 @@
+# ==============================================================================
+# Docker Compose для РОССИЙСКОГО СЕРВЕРА (PostgreSQL 16 + Web + AI Processor)
+# Полное соблюдение 152-ФЗ: ПДн, скачивание лекций, ffmpeg и GigaChat — в РФ!
+# ==============================================================================
+
+version: '3.8'
+
+services:
+  # 1. Сервис реляционной базы данных PostgreSQL 16
+  postgres:
+    image: postgres:16-alpine
+    container_name: olymp_postgres_server
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres_password}
+      POSTGRES_DB: ${DB_NAME:-lecture_db}
+    ports:
+      # Открываем порт 5432 для защищенного подключения Telegram-бота с зарубежного сервера
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-lecture_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Российская платформа: Web UI + API + Скачивание лекций + Обработка видео + Сбер GigaChat
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: olymp_web_platform
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      
+      # Отключаем локальный Telegram polling (бот запущен за рубежом)
+      - RUN_LOCAL_BOT=false
+      
+      # Включаем российский воркер скачивания, нарезки и анализа лекций
+      - RUN_RUSSIAN_WORKER=true
+      
+      # Telegram Bot Token (для отправки 2FA-кодов и уведомлений кураторам о готовности отчетов)
+      - BOT_TOKEN=${BOT_TOKEN}
+      
+      # Ключ доступа к КТалк API для скачивания записей
+      - TALK_API_KEY=${TALK_API_KEY}
+      
+      # Авторизация в Сбер GigaChat (выполняется строго из РФ!)
+      - GIGACHAT_CREDENTIALS=${GIGACHAT_CREDENTIALS}
+      - GIGACHAT_CLIENT_ID=${GIGACHAT_CLIENT_ID}
+      - GIGACHAT_CLIENT_SECRET=${GIGACHAT_CLIENT_SECRET}
+      - GIGACHAT_SCOPE=${GIGACHAT_SCOPE:-GIGACHAT_API_CORP}
+      - GIGACHAT_MODEL=${GIGACHAT_MODEL:-GigaChat-2-Pro}
+      
+      # Подключение к локальной базе PostgreSQL
+      - DB_TYPE=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres_password}
+      - DB_NAME=${DB_NAME:-lecture_db}
+      
+      # Секретный ключ HMAC для разовых ссылок преподавателей и сессий промптов
+      - TOKEN_SECRET=${TOKEN_SECRET:-olymp-secret-key-2026-checker-secret-secure-salt-2026}
+      
+      # Списки администраторов
+      - ADMIN_USERNAMES=${ADMIN_USERNAMES:-shurygin_egor,aemss72}
+      - PROMPT_ADMIN_USERNAMES=${PROMPT_ADMIN_USERNAMES:-shurygin_egor,aemss72}
+      
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TESTING_MODE=${TESTING_MODE:-false}
+    volumes:
+      # Постоянное хранилище промптов
+      - ./data:/app/data
+      # Временная папка для нарезки видео (сразу удаляется после анализа)
+      - ./temp_lectures:/app/temp_lectures
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  postgres_data:
+    driver: local

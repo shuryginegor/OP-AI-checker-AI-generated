@@ -1,0 +1,6 @@
+{
+  "name": "Lecture AI Analyzer Bot",
+  "description": "Telegram bot and AI service for analyzing KTalk video lectures using GigaChat API",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
