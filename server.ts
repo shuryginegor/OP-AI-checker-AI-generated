@@ -713,8 +713,7 @@ async function startServer() {
       success: true,
       message: `Код подтверждения отправлен на почту ${user.email}.`,
       sent_via_smtp: emailResult.sent,
-      from_email: emailResult.from,
-      dev_code: code
+      from_email: emailResult.from
     });
   });
 

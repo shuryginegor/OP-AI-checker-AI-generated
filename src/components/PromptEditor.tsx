@@ -63,7 +63,6 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
   // Состояние модального окна подтверждения сохранения/сброса (2FA через Email)
   const [modalAction, setModalAction] = useState<string | null>(null);
   const [modalCode, setModalCode] = useState<string>('');
-  const [devCode, setDevCode] = useState<string>('');
   const [isRequestingSaveCode, setIsRequestingSaveCode] = useState<boolean>(false);
   const [isConfirmingSave, setIsConfirmingSave] = useState<boolean>(false);
   const [modalError, setModalError] = useState<string>('');
@@ -118,7 +117,6 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
   const handleOpenActionModal = async (action: string) => {
     setModalAction(action);
     setModalCode('');
-    setDevCode('');
     setModalError('');
     setIsRequestingSaveCode(true);
 
@@ -138,9 +136,6 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
       if (!res.ok || !data.success) {
         setModalError(data.message || 'Не удалось отправить код подтверждения на ваш email.');
         return;
-      }
-      if (data.dev_code) {
-        setDevCode(data.dev_code);
       }
     } catch (err: any) {
       setModalError(err.message || 'Ошибка связи с сервером.');
@@ -405,12 +400,6 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               </div>
             </div>
 
-            {devCode && (
-              <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 flex items-center justify-between">
-                <span>Код из письма (для быстрой проверки):</span>
-                <span className="font-mono font-bold text-base tracking-widest text-white">{devCode}</span>
-              </div>
-            )}
 
             {modalError && (
               <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-center gap-2">
