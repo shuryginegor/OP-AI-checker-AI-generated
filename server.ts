@@ -7,7 +7,6 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { execFile, spawn, ChildProcess } from "child_process";
-import { createServer as createViteServer } from "vite";
 import * as XLSX from "xlsx";
 
 import {
@@ -797,8 +796,9 @@ async function startServer() {
     });
   }
 
-  // Vite middleware для фронтенда
+  // Vite middleware для фронтенда (только в dev режиме)
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
