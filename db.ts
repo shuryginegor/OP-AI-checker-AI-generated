@@ -483,39 +483,65 @@ export async function getCurators(): Promise<CuratorRecord[]> {
 
 export async function getCuratorByEmail(email: string): Promise<CuratorRecord | null> {
   const normalized = email.toLowerCase().trim();
+  const SUPERADMIN_EMAIL = 'shurygin.egor2009@gmail.com';
+
   try {
     if (isPostgres && pgPool) {
       const res = await pgPool.query(`SELECT * FROM curators WHERE LOWER(email) = $1 LIMIT 1`, [normalized]);
-      if (res.rows.length === 0) return null;
-      const r = res.rows[0];
-      return {
-        id: r.id,
-        email: r.email,
-        fullName: r.full_name,
-        role: r.role,
-        status: r.status,
-        addedBy: r.added_by,
-        createdAt: new Date(r.created_at).toISOString(),
-        lastLoginAt: r.last_login_at ? new Date(r.last_login_at).toISOString() : null
-      };
+      if (res.rows.length > 0) {
+        const r = res.rows[0];
+        return {
+          id: r.id,
+          email: r.email,
+          fullName: r.full_name,
+          role: r.role,
+          status: r.status,
+          addedBy: r.added_by,
+          createdAt: new Date(r.created_at).toISOString(),
+          lastLoginAt: r.last_login_at ? new Date(r.last_login_at).toISOString() : null
+        };
+      }
     } else if (sqliteDb) {
       const stmt = sqliteDb.prepare(`SELECT * FROM curators WHERE LOWER(email) = ? LIMIT 1`);
       const r = stmt.get(normalized) as any;
-      if (!r) return null;
-      return {
-        id: r.id,
-        email: r.email,
-        fullName: r.full_name,
-        role: r.role,
-        status: r.status,
-        addedBy: r.added_by,
-        createdAt: r.created_at,
-        lastLoginAt: r.last_login_at
-      };
+      if (r) {
+        return {
+          id: r.id,
+          email: r.email,
+          fullName: r.full_name,
+          role: r.role,
+          status: r.status,
+          addedBy: r.added_by,
+          createdAt: r.created_at,
+          lastLoginAt: r.last_login_at
+        };
+      }
     }
   } catch (err) {
     console.error('[БД] Ошибка поиска куратора:', err);
   }
+
+  // 100% гарантия доступа для главного администратора:
+  // Если таблица еще пуста, пересоздается или запрос не вернул строку:
+  if (normalized === SUPERADMIN_EMAIL) {
+    const superAdminRecord: CuratorRecord = {
+      id: 'cur_superadmin_root',
+      email: SUPERADMIN_EMAIL,
+      fullName: 'Егор Шурыгин (Главный администратор)',
+      role: 'senior_curator',
+      status: 'active',
+      addedBy: 'Система (Владелец портала)',
+      createdAt: new Date().toISOString(),
+      lastLoginAt: null
+    };
+
+    // Фоновая попытка гарантировать наличие записи в БД
+    if (isPostgres && pgPool) {
+      insertCurator(superAdminRecord).catch(() => {});
+    }
+    return superAdminRecord;
+  }
+
   return null;
 }
 
@@ -780,8 +806,12 @@ export async function insertTeacherIfNotExists(name: string, subject?: string): 
 // -------------------------------------------------------------
 // 9. ОДНОРАЗОВЫЕ КОДЫ (OTP) В БД
 // -------------------------------------------------------------
+const inMemoryOtpStore = new Map<string, { code: string; expiresAt: number; attempts: number }>();
+
 export async function storeOTPInDB(email: string, code: string, purpose: string, expiresAt: number): Promise<void> {
   const normalized = email.toLowerCase().trim();
+  inMemoryOtpStore.set(`${normalized}:${purpose}`, { code, expiresAt, attempts: 0 });
+
   try {
     if (isPostgres && pgPool) {
       await pgPool.query(
@@ -803,6 +833,7 @@ export async function verifyOTPFromDB(email: string, inputCode: string, purpose:
   const normalized = email.toLowerCase().trim();
   const cleanCode = inputCode.trim();
   const now = Date.now();
+  const key = `${normalized}:${purpose}`;
 
   try {
     if (isPostgres && pgPool) {
@@ -813,27 +844,26 @@ export async function verifyOTPFromDB(email: string, inputCode: string, purpose:
         [normalized, purpose]
       );
 
-      if (res.rows.length === 0) {
-        return { valid: false, message: 'Код подтверждения не найден или уже был использован.' };
-      }
+      if (res.rows.length > 0) {
+        const row = res.rows[0];
+        if (now > Number(row.expires_at)) {
+          return { valid: false, message: 'Срок действия кода истек (5 минут). Запросите новый код.' };
+        }
 
-      const row = res.rows[0];
-      if (now > Number(row.expires_at)) {
-        return { valid: false, message: 'Срок действия кода истек (5 минут). Запросите новый код.' };
-      }
+        if (row.attempts >= 5) {
+          return { valid: false, message: 'Превышено число попыток ввода кода.' };
+        }
 
-      if (row.attempts >= 5) {
-        return { valid: false, message: 'Превышено число попыток ввода кода.' };
-      }
+        if (row.code !== cleanCode) {
+          await pgPool.query(`UPDATE otp_codes SET attempts = attempts + 1 WHERE id = $1`, [row.id]);
+          return { valid: false, message: 'Неверный код подтверждения.' };
+        }
 
-      if (row.code !== cleanCode) {
-        await pgPool.query(`UPDATE otp_codes SET attempts = attempts + 1 WHERE id = $1`, [row.id]);
-        return { valid: false, message: 'Неверный код подтверждения.' };
+        // Успешно - помечаем код использованным
+        await pgPool.query(`UPDATE otp_codes SET used = 1 WHERE id = $1`, [row.id]);
+        inMemoryOtpStore.delete(key);
+        return { valid: true, message: 'Код успешно подтвержден.' };
       }
-
-      // Успешно - помечаем код использованным
-      await pgPool.query(`UPDATE otp_codes SET used = 1 WHERE id = $1`, [row.id]);
-      return { valid: true, message: 'Код успешно подтвержден.' };
     } else if (sqliteDb) {
       const stmt = sqliteDb.prepare(
         `SELECT id, code, expires_at, attempts, used FROM otp_codes
@@ -842,31 +872,52 @@ export async function verifyOTPFromDB(email: string, inputCode: string, purpose:
       );
       const row = stmt.get(normalized, purpose) as any;
 
-      if (!row) {
-        return { valid: false, message: 'Код подтверждения не найден или уже был использован.' };
-      }
+      if (row) {
+        if (now > Number(row.expires_at)) {
+          return { valid: false, message: 'Срок действия кода истек (5 минут). Запросите новый код.' };
+        }
 
-      if (now > Number(row.expires_at)) {
-        return { valid: false, message: 'Срок действия кода истек (5 минут). Запросите новый код.' };
-      }
+        if (row.attempts >= 5) {
+          return { valid: false, message: 'Превышено число попыток ввода кода.' };
+        }
 
-      if (row.attempts >= 5) {
-        return { valid: false, message: 'Превышено число попыток ввода кода.' };
-      }
+        if (row.code !== cleanCode) {
+          sqliteDb.prepare(`UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?`).run(row.id);
+          return { valid: false, message: 'Неверный код подтверждения.' };
+        }
 
-      if (row.code !== cleanCode) {
-        sqliteDb.prepare(`UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?`).run(row.id);
-        return { valid: false, message: 'Неверный код подтверждения.' };
+        sqliteDb.prepare(`UPDATE otp_codes SET used = 1 WHERE id = ?`).run(row.id);
+        inMemoryOtpStore.delete(key);
+        return { valid: true, message: 'Код успешно подтвержден.' };
       }
-
-      sqliteDb.prepare(`UPDATE otp_codes SET used = 1 WHERE id = ?`).run(row.id);
-      return { valid: true, message: 'Код успешно подтвержден.' };
     }
   } catch (err) {
     console.error('[БД] Ошибка проверки OTP в БД:', err);
   }
 
-  return { valid: false, message: 'Ошибка базы данных при проверке кода.' };
+  // Fallback к in-memory хранилищу
+  const memOtp = inMemoryOtpStore.get(key);
+  if (!memOtp) {
+    return { valid: false, message: 'Код подтверждения не найден или уже был использован.' };
+  }
+
+  if (now > memOtp.expiresAt) {
+    inMemoryOtpStore.delete(key);
+    return { valid: false, message: 'Срок действия кода истек (5 минут). Запросите новый код.' };
+  }
+
+  if (memOtp.attempts >= 5) {
+    inMemoryOtpStore.delete(key);
+    return { valid: false, message: 'Превышено число попыток ввода кода.' };
+  }
+
+  if (memOtp.code !== cleanCode) {
+    memOtp.attempts += 1;
+    return { valid: false, message: 'Неверный код подтверждения.' };
+  }
+
+  inMemoryOtpStore.delete(key);
+  return { valid: true, message: 'Код успешно подтвержден.' };
 }
 
 // -------------------------------------------------------------
