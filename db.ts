@@ -1,7 +1,6 @@
 import { Pool } from 'pg';
 import path from 'path';
 import fs from 'fs';
-import { DatabaseSync } from 'node:sqlite';
 
 export interface CuratorRecord {
   id: string;
@@ -50,7 +49,7 @@ if (!fs.existsSync(DATA_DIR)) {
 const SQLITE_FILE = path.join(DATA_DIR, 'app_database.sqlite');
 
 let pgPool: Pool | null = null;
-let sqliteDb: DatabaseSync | null = null;
+let sqliteDb: any = null;
 let isPostgres = false;
 
 // 1. Инициализация подключения
@@ -70,7 +69,7 @@ export async function initDatabase(): Promise<{ isPostgres: boolean }> {
         user,
         password,
         database,
-        connectionTimeoutMillis: 3000,
+        connectionTimeoutMillis: 5000,
         idleTimeoutMillis: 30000,
         max: 10
       });
@@ -86,22 +85,53 @@ export async function initDatabase(): Promise<{ isPostgres: boolean }> {
       await seedInitialData();
       return { isPostgres: true };
     } catch (err: any) {
-      console.warn(`[БД] ⚠️ Не удалось подключиться к PostgreSQL (${err.message}). Выполняется переключение на встроенную реляционную SQLite базу.`);
+      console.warn(`[БД] ⚠️ Не удалось подключиться к PostgreSQL (${err.message}). Выполняется проверка резервной базы.`);
     }
   }
 
-  // Fallback на SQLite
+  // Fallback на SQLite (если модуль доступен в рантайме)
   try {
-    sqliteDb = new DatabaseSync(SQLITE_FILE);
-    sqliteDb.exec('PRAGMA journal_mode = WAL;');
-    sqliteDb.exec('PRAGMA synchronous = NORMAL;');
-    isPostgres = false;
-    console.log(`[БД] ✅ База данных SQLite (${SQLITE_FILE}) успешно инициализирована.`);
-    await initTablesSQLite();
-    await seedInitialData();
-    return { isPostgres: false };
+    let DatabaseSyncClass: any = null;
+    try {
+      // @ts-ignore
+      const sqliteMod = await import('node:sqlite');
+      DatabaseSyncClass = sqliteMod.DatabaseSync;
+    } catch {
+      // Модуль node:sqlite отсутствует в Node 20
+    }
+
+    if (DatabaseSyncClass) {
+      sqliteDb = new DatabaseSyncClass(SQLITE_FILE);
+      sqliteDb.exec('PRAGMA journal_mode = WAL;');
+      sqliteDb.exec('PRAGMA synchronous = NORMAL;');
+      isPostgres = false;
+      console.log(`[БД] ✅ База данных SQLite (${SQLITE_FILE}) успешно инициализирована.`);
+      await initTablesSQLite();
+      await seedInitialData();
+      return { isPostgres: false };
+    } else {
+      console.log(`[БД] 🔄 Повторная попытка соединения с PostgreSQL 16 (${host}:${port}/${database})...`);
+      const retryPool = new Pool({
+        host,
+        port,
+        user,
+        password,
+        database,
+        connectionTimeoutMillis: 10000,
+        idleTimeoutMillis: 30000,
+        max: 10
+      });
+      const client = await retryPool.connect();
+      client.release();
+      pgPool = retryPool;
+      isPostgres = true;
+      console.log(`[БД] ✅ Успешное подключение к PostgreSQL 16 со второй попытки.`);
+      await initTablesPG();
+      await seedInitialData();
+      return { isPostgres: true };
+    }
   } catch (err: any) {
-    console.error(`[БД] ❌ Критическая ошибка инициализации SQLite:`, err);
+    console.error(`[БД] ❌ Критическая ошибка инициализации БД:`, err);
     throw err;
   }
 }
