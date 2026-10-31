@@ -361,7 +361,13 @@ async function seedInitialData() {
     console.warn('[БД] Предупреждение при очистке автобелого списка:', e);
   }
 
-  // Восстановление проверок лекций из бэкапа при старте
+  // Восстановление проверок лекций и списка кураторов из бэкапа при старте
+  try {
+    await hydrateCuratorsFromBackup();
+  } catch (e) {
+    console.warn('[БД] Ошибка восстановления кураторов из бэкапа:', e);
+  }
+
   try {
     await hydrateLectureTasksFromBackup();
   } catch (e) {
@@ -528,44 +534,86 @@ export async function getAuditLogs(limit = 100): Promise<AuditLogRecord[]> {
 // -------------------------------------------------------------
 // 6. ОПЕРАЦИИ С КУРАТОРАМИ В БД
 // -------------------------------------------------------------
+let inMemoryCuratorsMap = new Map<string, CuratorRecord>();
+
+export async function hydrateCuratorsFromBackup(): Promise<void> {
+  const backupPath = path.join(DATA_DIR, 'curators.json');
+  if (!fs.existsSync(backupPath)) return;
+  try {
+    const raw = fs.readFileSync(backupPath, 'utf-8');
+    const listFromFile: CuratorRecord[] = JSON.parse(raw);
+    if (Array.isArray(listFromFile)) {
+      for (const item of listFromFile) {
+        if (item && item.email) {
+          inMemoryCuratorsMap.set(item.email.toLowerCase().trim(), item);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[БД] Ошибка гидрации кураторов из бэкапа:', err);
+  }
+}
+
+export async function saveCuratorsBackup(): Promise<void> {
+  try {
+    const backupPath = path.join(DATA_DIR, 'curators.json');
+    const list = Array.from(inMemoryCuratorsMap.values());
+    fs.writeFileSync(backupPath, JSON.stringify(list, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[БД] Ошибка сохранения бэкапа кураторов:', err);
+  }
+}
 export async function getCurators(): Promise<CuratorRecord[]> {
   const SUPERADMIN_EMAIL = 'shurygin.egor2009@gmail.com';
-  let curators: CuratorRecord[] = [];
+  const curatorsMap = new Map<string, CuratorRecord>();
+
+  for (const [em, c] of inMemoryCuratorsMap.entries()) {
+    curatorsMap.set(em, c);
+  }
 
   try {
     if (isPostgres && pgPool) {
       const res = await pgPool.query(`SELECT * FROM curators ORDER BY created_at ASC`);
-      curators = res.rows.map(r => ({
-        id: r.id,
-        email: r.email,
-        fullName: r.full_name,
-        role: r.role,
-        status: r.status,
-        addedBy: r.added_by,
-        createdAt: new Date(r.created_at).toISOString(),
-        lastLoginAt: r.last_login_at ? new Date(r.last_login_at).toISOString() : null
-      }));
+      for (const r of res.rows) {
+        const item: CuratorRecord = {
+          id: r.id,
+          email: r.email,
+          fullName: r.full_name || r.email,
+          role: r.role || 'curator',
+          status: r.status || 'active',
+          addedBy: r.added_by || 'Система',
+          createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
+          lastLoginAt: r.last_login_at ? new Date(r.last_login_at).toISOString() : null
+        };
+        const normEmail = item.email.toLowerCase().trim();
+        curatorsMap.set(normEmail, item);
+        inMemoryCuratorsMap.set(normEmail, item);
+      }
     } else if (sqliteDb) {
       const stmt = sqliteDb.prepare(`SELECT * FROM curators ORDER BY created_at ASC`);
       const rows = stmt.all() as any[];
-      curators = rows.map(r => ({
-        id: r.id,
-        email: r.email,
-        fullName: r.full_name,
-        role: r.role,
-        status: r.status,
-        addedBy: r.added_by,
-        createdAt: r.created_at,
-        lastLoginAt: r.last_login_at
-      }));
+      for (const r of rows) {
+        const item: CuratorRecord = {
+          id: r.id,
+          email: r.email,
+          fullName: r.full_name || r.email,
+          role: r.role || 'curator',
+          status: r.status || 'active',
+          addedBy: r.added_by || 'Система',
+          createdAt: r.created_at || new Date().toISOString(),
+          lastLoginAt: r.last_login_at || null
+        };
+        const normEmail = item.email.toLowerCase().trim();
+        curatorsMap.set(normEmail, item);
+        inMemoryCuratorsMap.set(normEmail, item);
+      }
     }
   } catch (err) {
     console.error('[БД] Ошибка чтения curators:', err);
   }
 
   // Гарантия: суперпользователь shurygin.egor2009@gmail.com всегда присутствует
-  const superAdminExists = curators.some(c => c.email.toLowerCase() === SUPERADMIN_EMAIL);
-  if (!superAdminExists) {
+  if (!curatorsMap.has(SUPERADMIN_EMAIL)) {
     const superAdminRecord: CuratorRecord = {
       id: 'cur_superadmin_root',
       email: SUPERADMIN_EMAIL,
@@ -577,46 +625,54 @@ export async function getCurators(): Promise<CuratorRecord[]> {
       lastLoginAt: null
     };
     await insertCurator(superAdminRecord);
-    curators.unshift(superAdminRecord);
+    curatorsMap.set(SUPERADMIN_EMAIL, superAdminRecord);
+    inMemoryCuratorsMap.set(SUPERADMIN_EMAIL, superAdminRecord);
   }
 
-  return curators;
+  return Array.from(curatorsMap.values());
 }
 
 export async function getCuratorByEmail(email: string): Promise<CuratorRecord | null> {
   const normalized = email.toLowerCase().trim();
   const SUPERADMIN_EMAIL = 'shurygin.egor2009@gmail.com';
 
+  const inMem = inMemoryCuratorsMap.get(normalized);
+  if (inMem) return inMem;
+
   try {
     if (isPostgres && pgPool) {
       const res = await pgPool.query(`SELECT * FROM curators WHERE LOWER(email) = $1 LIMIT 1`, [normalized]);
       if (res.rows.length > 0) {
         const r = res.rows[0];
-        return {
+        const record: CuratorRecord = {
           id: r.id,
           email: r.email,
-          fullName: r.full_name,
-          role: r.role,
-          status: r.status,
-          addedBy: r.added_by,
-          createdAt: new Date(r.created_at).toISOString(),
+          fullName: r.full_name || r.email,
+          role: r.role || 'curator',
+          status: r.status || 'active',
+          addedBy: r.added_by || 'Система',
+          createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
           lastLoginAt: r.last_login_at ? new Date(r.last_login_at).toISOString() : null
         };
+        inMemoryCuratorsMap.set(normalized, record);
+        return record;
       }
     } else if (sqliteDb) {
       const stmt = sqliteDb.prepare(`SELECT * FROM curators WHERE LOWER(email) = ? LIMIT 1`);
       const r = stmt.get(normalized) as any;
       if (r) {
-        return {
+        const record: CuratorRecord = {
           id: r.id,
           email: r.email,
-          fullName: r.full_name,
-          role: r.role,
-          status: r.status,
-          addedBy: r.added_by,
-          createdAt: r.created_at,
-          lastLoginAt: r.last_login_at
+          fullName: r.full_name || r.email,
+          role: r.role || 'curator',
+          status: r.status || 'active',
+          addedBy: r.added_by || 'Система',
+          createdAt: r.created_at || new Date().toISOString(),
+          lastLoginAt: r.last_login_at || null
         };
+        inMemoryCuratorsMap.set(normalized, record);
+        return record;
       }
     }
   } catch (err) {
@@ -644,32 +700,53 @@ export async function getCuratorByEmail(email: string): Promise<CuratorRecord | 
 }
 
 export async function insertCurator(curator: CuratorRecord): Promise<boolean> {
+  const emailNorm = curator.email.toLowerCase().trim();
+  const safeRecord: CuratorRecord = {
+    id: curator.id || `cur_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    email: emailNorm,
+    fullName: (curator.fullName || '').trim() || emailNorm,
+    role: curator.role === 'senior_curator' ? 'senior_curator' : 'curator',
+    status: curator.status === 'blocked' ? 'blocked' : 'active',
+    addedBy: (curator.addedBy || '').trim() || 'Система',
+    createdAt: curator.createdAt || new Date().toISOString(),
+    lastLoginAt: curator.lastLoginAt || null
+  };
+
+  inMemoryCuratorsMap.set(emailNorm, safeRecord);
+  saveCuratorsBackup().catch(() => {});
+
   try {
     if (isPostgres && pgPool) {
       await pgPool.query(
         `INSERT INTO curators (id, email, full_name, role, status, added_by)
          VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (email) DO UPDATE SET full_name = $3, role = $4, status = $5`,
-        [curator.id, curator.email.toLowerCase().trim(), curator.fullName, curator.role, curator.status, curator.addedBy]
+         ON CONFLICT (email) DO UPDATE SET full_name = $3, role = $4, status = $5, added_by = $6`,
+        [safeRecord.id, safeRecord.email, safeRecord.fullName, safeRecord.role, safeRecord.status, safeRecord.addedBy]
       );
       return true;
     } else if (sqliteDb) {
       const stmt = sqliteDb.prepare(
         `INSERT INTO curators (id, email, full_name, role, status, added_by)
          VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (email) DO UPDATE SET full_name = excluded.full_name, role = excluded.role, status = excluded.status`
+         ON CONFLICT (email) DO UPDATE SET full_name = excluded.full_name, role = excluded.role, status = excluded.status, added_by = excluded.added_by`
       );
-      stmt.run(curator.id, curator.email.toLowerCase().trim(), curator.fullName, curator.role, curator.status, curator.addedBy);
+      stmt.run(safeRecord.id, safeRecord.email, safeRecord.fullName, safeRecord.role, safeRecord.status, safeRecord.addedBy);
       return true;
     }
   } catch (err) {
-    console.error('[БД] Ошибка добавления куратора:', err);
+    console.error('[БД] Ошибка добавления куратора в БД:', err);
   }
-  return false;
+
+  return true;
 }
 
 export async function updateCuratorRoleInDB(email: string, role: 'curator' | 'senior_curator'): Promise<boolean> {
   const normalized = email.toLowerCase().trim();
+  const item = inMemoryCuratorsMap.get(normalized);
+  if (item) {
+    item.role = role;
+    saveCuratorsBackup().catch(() => {});
+  }
   try {
     if (isPostgres && pgPool) {
       await pgPool.query(`UPDATE curators SET role = $1 WHERE LOWER(email) = $2`, [role, normalized]);
@@ -682,11 +759,16 @@ export async function updateCuratorRoleInDB(email: string, role: 'curator' | 'se
   } catch (err) {
     console.error('[БД] Ошибка смены роли:', err);
   }
-  return false;
+  return true;
 }
 
 export async function updateCuratorStatusInDB(email: string, status: 'active' | 'blocked'): Promise<boolean> {
   const normalized = email.toLowerCase().trim();
+  const item = inMemoryCuratorsMap.get(normalized);
+  if (item) {
+    item.status = status;
+    saveCuratorsBackup().catch(() => {});
+  }
   try {
     if (isPostgres && pgPool) {
       await pgPool.query(`UPDATE curators SET status = $1 WHERE LOWER(email) = $2`, [status, normalized]);
@@ -699,11 +781,16 @@ export async function updateCuratorStatusInDB(email: string, status: 'active' | 
   } catch (err) {
     console.error('[БД] Ошибка смены статуса:', err);
   }
-  return false;
+  return true;
 }
 
 export async function touchCuratorLoginInDB(email: string): Promise<void> {
   const normalized = email.toLowerCase().trim();
+  const item = inMemoryCuratorsMap.get(normalized);
+  if (item) {
+    item.lastLoginAt = new Date().toISOString();
+    saveCuratorsBackup().catch(() => {});
+  }
   try {
     if (isPostgres && pgPool) {
       await pgPool.query(`UPDATE curators SET last_login_at = CURRENT_TIMESTAMP WHERE LOWER(email) = $1`, [normalized]);
@@ -718,20 +805,23 @@ export async function touchCuratorLoginInDB(email: string): Promise<void> {
 
 export async function deleteCuratorFromDB(email: string): Promise<boolean> {
   const normalized = email.toLowerCase().trim();
+  inMemoryCuratorsMap.delete(normalized);
+  saveCuratorsBackup().catch(() => {});
   try {
     if (isPostgres && pgPool) {
-      const res = await pgPool.query(`DELETE FROM curators WHERE LOWER(email) = $1`, [normalized]);
-      return (res.rowCount || 0) > 0;
+      await pgPool.query(`DELETE FROM curators WHERE LOWER(email) = $1`, [normalized]);
+      return true;
     } else if (sqliteDb) {
       const stmt = sqliteDb.prepare(`DELETE FROM curators WHERE LOWER(email) = ?`);
-      const info = stmt.run(normalized);
-      return (info.changes || 0) > 0;
+      stmt.run(normalized);
+      return true;
     }
   } catch (err) {
     console.error('[БД] Ошибка удаления куратора:', err);
   }
-  return false;
+  return true;
 }
+
 
 // -------------------------------------------------------------
 // 7. ОПЕРАЦИИ С ЗАДАЧАМИ АНАЛИЗА ЛЕКЦИЙ В БД
@@ -838,17 +928,39 @@ export async function getLectureTaskByUrl(rawUrl: string): Promise<LectureTaskRe
 }
 
 export async function insertLectureTask(task: LectureTaskRecord): Promise<boolean> {
-  // Сразу кэшируем в память
-  inMemoryTasksMap.set(task.id, task);
+  const safeTask: LectureTaskRecord = {
+    id: task.id || `lec_${Date.now()}`,
+    lectureUrl: (task.lectureUrl || '').trim(),
+    teacherName: (task.teacherName || '').trim() || 'Преподаватель',
+    subject: (task.subject || '').trim() || 'Олимпиадная подготовка',
+    groupName: (task.groupName || '').trim() || 'Основная группа',
+    date: task.date || new Date().toISOString().replace('T', ' ').slice(0, 16),
+    totalScore: typeof task.totalScore === 'number' ? task.totalScore : 0,
+    status: task.status || 'pending',
+    progressPct: typeof task.progressPct === 'number' ? task.progressPct : 0,
+    curatorEmail: (task.curatorEmail || '').trim() || 'system',
+    criticalViolations: Array.isArray(task.criticalViolations) ? task.criticalViolations : [],
+    positiveHighlights: Array.isArray(task.positiveHighlights) ? task.positiveHighlights : [],
+    recommendations: Array.isArray(task.recommendations) ? task.recommendations : [],
+    criteria: Array.isArray(task.criteria) ? task.criteria : [],
+    createdAt: task.createdAt || new Date().toISOString(),
+    talkMetadata: task.talkMetadata || null,
+    isCorrupted: Boolean(task.isCorrupted),
+    rawBrokenResponse: task.rawBrokenResponse || null
+  };
+
+  // Сразу кэшируем в память и мгновенно сохраняем в файл бэкапа
+  inMemoryTasksMap.set(safeTask.id, safeTask);
+  createLectureTasksBackup().catch(() => {});
 
   try {
-    const critJson = JSON.stringify(task.criticalViolations || []);
-    const posJson = JSON.stringify(task.positiveHighlights || []);
-    const recJson = JSON.stringify(task.recommendations || []);
-    const criteriaJson = JSON.stringify(task.criteria || []);
-    const talkMetaJson = task.talkMetadata ? JSON.stringify(task.talkMetadata) : null;
-    const isCorruptedVal = task.isCorrupted ? 1 : 0;
-    const rawBroken = task.rawBrokenResponse || null;
+    const critJson = JSON.stringify(safeTask.criticalViolations);
+    const posJson = JSON.stringify(safeTask.positiveHighlights);
+    const recJson = JSON.stringify(safeTask.recommendations);
+    const criteriaJson = JSON.stringify(safeTask.criteria);
+    const talkMetaJson = safeTask.talkMetadata ? JSON.stringify(safeTask.talkMetadata) : null;
+    const isCorruptedVal = safeTask.isCorrupted ? 1 : 0;
+    const rawBroken = safeTask.rawBrokenResponse || null;
 
     if (isPostgres && pgPool) {
       await pgPool.query(
@@ -865,10 +977,10 @@ export async function insertLectureTask(task: LectureTaskRecord): Promise<boolea
            is_corrupted = $16,
            raw_broken_response = COALESCE($17, lecture_tasks.raw_broken_response)`,
         [
-          task.id, task.lectureUrl, task.teacherName, task.subject, task.groupName, task.date,
-          task.totalScore, task.status, task.progressPct, task.curatorEmail,
+          safeTask.id, safeTask.lectureUrl, safeTask.teacherName, safeTask.subject, safeTask.groupName, safeTask.date,
+          safeTask.totalScore, safeTask.status, safeTask.progressPct, safeTask.curatorEmail,
           critJson, posJson, recJson, criteriaJson,
-          talkMetaJson, Boolean(task.isCorrupted), rawBroken
+          talkMetaJson, Boolean(safeTask.isCorrupted), rawBroken
         ]
       );
       return true;
@@ -889,8 +1001,8 @@ export async function insertLectureTask(task: LectureTaskRecord): Promise<boolea
            raw_broken_response = COALESCE(excluded.raw_broken_response, lecture_tasks.raw_broken_response)`
       );
       stmt.run(
-        task.id, task.lectureUrl, task.teacherName, task.subject, task.groupName, task.date,
-        task.totalScore, task.status, task.progressPct, task.curatorEmail,
+        safeTask.id, safeTask.lectureUrl, safeTask.teacherName, safeTask.subject, safeTask.groupName, safeTask.date,
+        safeTask.totalScore, safeTask.status, safeTask.progressPct, safeTask.curatorEmail,
         critJson, posJson, recJson, criteriaJson,
         talkMetaJson, isCorruptedVal, rawBroken
       );
@@ -934,6 +1046,9 @@ export async function updateLectureTaskProgressInDB(
     if (subject) mem.subject = subject;
   }
 
+  // Мгновенное сохранение снимка памяти в файл бэкапа
+  createLectureTasksBackup().catch(() => {});
+
   try {
     const posJson = positiveHighlights ? JSON.stringify(positiveHighlights) : null;
     const recJson = recommendations ? JSON.stringify(recommendations) : null;
@@ -956,7 +1071,7 @@ export async function updateLectureTaskProgressInDB(
              teacher_name = COALESCE($11, teacher_name),
              subject = COALESCE($12, subject)
            WHERE id = $13`,
-          [status, progressPct, totalScore, posJson, recJson, critJson, critViolJson, talkMetaJson, isCorrupted, rawBrokenResponse, teacherName || null, subject || null, taskId]
+          [status, progressPct, totalScore, posJson, recJson, critJson, critViolJson, talkMetaJson, isCorrupted, rawBrokenResponse || null, teacherName || null, subject || null, taskId]
         );
       } else {
         await pgPool.query(
@@ -979,7 +1094,7 @@ export async function updateLectureTaskProgressInDB(
              subject = COALESCE(?, subject)
            WHERE id = ?`
         );
-        stmt.run(status, progressPct, totalScore, posJson, recJson, critJson, critViolJson, talkMetaJson, isCorruptedNum, rawBrokenResponse, teacherName || null, subject || null, taskId);
+        stmt.run(status, progressPct, totalScore, posJson, recJson, critJson, critViolJson, talkMetaJson, isCorruptedNum, rawBrokenResponse || null, teacherName || null, subject || null, taskId);
       } else {
         const stmt = sqliteDb.prepare(
           `UPDATE lecture_tasks SET status = ?, progress_pct = ? WHERE id = ?`
@@ -1266,12 +1381,20 @@ export async function hydrateLectureTasksFromBackup(): Promise<number> {
       return 0;
     }
 
+    // 1. Мгновенно загружаем все задачи из файла бэкапа в память
+    for (const task of backupTasks) {
+      if (task && task.id) {
+        inMemoryTasksMap.set(task.id, task);
+      }
+    }
+
+    // 2. Восстанавливаем записи в реляционную таблицу PostgreSQL / SQLite
     const currentTasks = await getLectureTasks();
     const currentIds = new Set(currentTasks.map(t => t.id));
 
     let restoredCount = 0;
     for (const task of backupTasks) {
-      if (task.id && !currentIds.has(task.id)) {
+      if (task && task.id) {
         await insertLectureTask(task);
         if (task.teacherName) {
           await insertTeacherIfNotExists(task.teacherName, task.subject);
@@ -1280,12 +1403,7 @@ export async function hydrateLectureTasksFromBackup(): Promise<number> {
       }
     }
 
-    if (restoredCount > 0) {
-      console.log(`[БД Гидрация] ✅ Восстановлено ${restoredCount} проверок лекций из резервной копии ${BACKUP_FILE}`);
-    } else {
-      console.log(`[БД Гидрация] Все ${backupTasks.length} проверок уже присутствуют в базе данных.`);
-    }
-
+    console.log(`[БД Гидрация] ✅ Восстановлено ${restoredCount} проверок лекций и загружено в дашборд из резервной копии ${BACKUP_FILE}`);
     return restoredCount;
   } catch (err) {
     console.error('[БД Гидрация] Ошибка гидрации проверок из бэкапа:', err);
