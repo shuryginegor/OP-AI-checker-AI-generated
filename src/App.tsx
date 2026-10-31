@@ -269,10 +269,11 @@ export default function App() {
 
       if (dataTasks.success) setTasks(dataTasks.tasks);
       if (dataTeachers.success) {
-        setTeachersList(dataTeachers.teachers);
-        if (dataTeachers.teachers.length > 0 && !selectedTeacher) {
-          setSelectedTeacher(dataTeachers.teachers[0]);
-        } else if (dataTeachers.teachers.length === 0) {
+        const list = Array.isArray(dataTeachers.teachers) ? dataTeachers.teachers : [];
+        setTeachersList(list);
+        if (list.length > 0 && !selectedTeacher) {
+          setSelectedTeacher(list[0]);
+        } else if (list.length === 0) {
           setSelectedTeacher('__new__');
         }
       }

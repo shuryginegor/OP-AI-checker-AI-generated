@@ -373,6 +373,12 @@ async function seedInitialData() {
   } catch (e) {
     console.warn('[БД] Ошибка восстановления проверок из бэкапа:', e);
   }
+
+  try {
+    await syncTeachersTableFromTasks();
+  } catch (e) {
+    console.warn('[БД] Ошибка синхронизации таблицы преподавателей:', e);
+  }
 }
 
 /**
@@ -1111,19 +1117,43 @@ export async function updateLectureTaskProgressInDB(
 // 8. ПРЕПОДАВАТЕЛИ В БД
 // -------------------------------------------------------------
 export async function getTeachersFromDB(): Promise<string[]> {
+  const teacherSet = new Set<string>();
+
+  // 1. Читаем из реляционной таблицы teachers (PostgreSQL / SQLite)
   try {
     if (isPostgres && pgPool) {
       const res = await pgPool.query(`SELECT name FROM teachers ORDER BY name ASC`);
-      return res.rows.map(r => r.name).filter(Boolean);
+      res.rows.forEach(r => {
+        if (r.name && typeof r.name === 'string' && r.name.trim()) {
+          teacherSet.add(r.name.trim());
+        }
+      });
     } else if (sqliteDb) {
       const stmt = sqliteDb.prepare(`SELECT name FROM teachers ORDER BY name ASC`);
       const rows = stmt.all() as any[];
-      return rows.map(r => r.name).filter(Boolean);
+      rows.forEach(r => {
+        if (r.name && typeof r.name === 'string' && r.name.trim()) {
+          teacherSet.add(r.name.trim());
+        }
+      });
     }
   } catch (err) {
     console.error('[БД] Ошибка чтения teachers:', err);
   }
-  return [];
+
+  // 2. Дополняем список преподавателями из всех проверенных и активных задач
+  try {
+    const tasks = await getLectureTasks();
+    tasks.forEach(t => {
+      if (t.teacherName && typeof t.teacherName === 'string' && t.teacherName.trim() && t.teacherName.trim() !== 'Преподаватель') {
+        teacherSet.add(t.teacherName.trim());
+      }
+    });
+  } catch (err) {
+    console.error('[БД] Ошибка агрегации преподавателей из задач:', err);
+  }
+
+  return Array.from(teacherSet).sort((a, b) => a.localeCompare(b, 'ru'));
 }
 
 export async function insertTeacherIfNotExists(name: string, subject?: string): Promise<void> {
@@ -1144,6 +1174,19 @@ export async function insertTeacherIfNotExists(name: string, subject?: string): 
     }
   } catch (err) {
     console.error('[БД] Ошибка добавления преподавателя:', err);
+  }
+}
+
+export async function syncTeachersTableFromTasks(): Promise<void> {
+  try {
+    const tasks = await getLectureTasks();
+    for (const t of tasks) {
+      if (t.teacherName && typeof t.teacherName === 'string' && t.teacherName.trim() && t.teacherName.trim() !== 'Преподаватель') {
+        await insertTeacherIfNotExists(t.teacherName.trim(), t.subject);
+      }
+    }
+  } catch (err) {
+    console.error('[БД] Ошибка авто-синхронизации преподавателей:', err);
   }
 }
 
