@@ -330,26 +330,24 @@ async function initTablesSQLite() {
   try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN raw_broken_response TEXT;"); } catch {}
 }
 
+let inMemoryAuditLogs: AuditLogRecord[] = [];
+
 // 4. Начальное наполнение БД (Seed)
 async function seedInitialData() {
   // Старший куратор (суперпользователь с полными правами) - ТОЛЬКО shurygin.egor2009@gmail.com
   const superAdminEmail = 'shurygin.egor2009@gmail.com';
-  const existing = await getCuratorByEmail(superAdminEmail);
-  if (!existing) {
-    await insertCurator({
-      id: `cur_superadmin_${Date.now()}`,
-      email: superAdminEmail,
-      fullName: 'Егор Шурыгин (Главный администратор)',
-      role: 'senior_curator',
-      status: 'active',
-      addedBy: 'Система (Владелец портала)',
-      createdAt: new Date().toISOString(),
-      lastLoginAt: null
-    });
-  } else {
-    await updateCuratorRoleInDB(superAdminEmail, 'senior_curator');
-    await updateCuratorStatusInDB(superAdminEmail, 'active');
-  }
+  const superAdminRecord: CuratorRecord = {
+    id: 'cur_superadmin_root',
+    email: superAdminEmail,
+    fullName: 'Егор Шурыгин (Главный администратор)',
+    role: 'senior_curator',
+    status: 'active',
+    addedBy: 'Система (Владелец портала)',
+    createdAt: new Date().toISOString(),
+    lastLoginAt: null
+  };
+
+  await insertCurator(superAdminRecord);
 
   // Очистка любых ошибочно авто-созданных кураторов из прежнего бага
   try {
@@ -363,7 +361,7 @@ async function seedInitialData() {
     console.warn('[БД] Предупреждение при очистке автобелого списка:', e);
   }
 
-  // Автоматическая гидрация проверок лекций из бэкапа при старте
+  // Восстановление проверок лекций из бэкапа при старте
   try {
     await hydrateLectureTasksFromBackup();
   } catch (e) {
@@ -419,22 +417,16 @@ export async function purgeDatabaseToCleanState(keepEmail: string = 'shurygin.eg
   }
 
   // Гарантируем, что суперпользователь существует в БД
-  const superUser = await getCuratorByEmail(targetEmail);
-  if (!superUser) {
-    await insertCurator({
-      id: `cur_superadmin_${Date.now()}`,
-      email: targetEmail,
-      fullName: 'Егор Шурыгин (Главный администратор)',
-      role: 'senior_curator',
-      status: 'active',
-      addedBy: 'Система (Владелец портала)',
-      createdAt: new Date().toISOString(),
-      lastLoginAt: null
-    });
-  } else {
-    await updateCuratorRoleInDB(targetEmail, 'senior_curator');
-    await updateCuratorStatusInDB(targetEmail, 'active');
-  }
+  await insertCurator({
+    id: `cur_superadmin_${Date.now()}`,
+    email: targetEmail,
+    fullName: 'Егор Шурыгин (Главный администратор)',
+    role: 'senior_curator',
+    status: 'active',
+    addedBy: 'Система (Владелец портала)',
+    createdAt: new Date().toISOString(),
+    lastLoginAt: null
+  });
 
   console.log(`[БД] ✅ База данных полностью очищена. В системе остался ТОЛЬКО ${targetEmail} (Senior Curator).`);
 }
@@ -450,6 +442,22 @@ export async function logAuditEvent(
   details: string,
   ipAddress: string = '127.0.0.1'
 ) {
+  const newLog: AuditLogRecord = {
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    timestamp: new Date().toISOString(),
+    actorEmail,
+    actorRole,
+    action,
+    target,
+    details,
+    ipAddress
+  };
+
+  inMemoryAuditLogs.unshift(newLog);
+  if (inMemoryAuditLogs.length > 500) {
+    inMemoryAuditLogs = inMemoryAuditLogs.slice(0, 500);
+  }
+
   try {
     if (isPostgres && pgPool) {
       await pgPool.query(
@@ -471,13 +479,14 @@ export async function logAuditEvent(
 
 export async function getAuditLogs(limit = 100): Promise<AuditLogRecord[]> {
   try {
+    let dbLogs: AuditLogRecord[] = [];
     if (isPostgres && pgPool) {
       const res = await pgPool.query(
         `SELECT id, timestamp, actor_email, actor_role, action, target, details, ip_address
          FROM audit_logs ORDER BY id DESC LIMIT $1`,
         [limit]
       );
-      return res.rows.map(r => ({
+      dbLogs = res.rows.map(r => ({
         id: r.id,
         timestamp: new Date(r.timestamp).toISOString(),
         actorEmail: r.actor_email,
@@ -493,7 +502,7 @@ export async function getAuditLogs(limit = 100): Promise<AuditLogRecord[]> {
          FROM audit_logs ORDER BY id DESC LIMIT ?`
       );
       const rows = stmt.all(limit) as any[];
-      return rows.map(r => ({
+      dbLogs = rows.map(r => ({
         id: r.id,
         timestamp: r.timestamp,
         actorEmail: r.actor_email,
@@ -504,20 +513,29 @@ export async function getAuditLogs(limit = 100): Promise<AuditLogRecord[]> {
         ipAddress: r.ip_address
       }));
     }
+
+    if (dbLogs.length > 0) {
+      return dbLogs;
+    }
   } catch (err) {
-    console.error('[БД] Ошибка чтения audit_logs:', err);
+    console.error('[БД] Ошибка чтения audit_logs из БД:', err);
   }
-  return [];
+
+  // Fallback на память / локальный бэкап если БД пока пуста или в процессе инициализации
+  return inMemoryAuditLogs.slice(0, limit);
 }
 
 // -------------------------------------------------------------
 // 6. ОПЕРАЦИИ С КУРАТОРАМИ В БД
 // -------------------------------------------------------------
 export async function getCurators(): Promise<CuratorRecord[]> {
+  const SUPERADMIN_EMAIL = 'shurygin.egor2009@gmail.com';
+  let curators: CuratorRecord[] = [];
+
   try {
     if (isPostgres && pgPool) {
       const res = await pgPool.query(`SELECT * FROM curators ORDER BY created_at ASC`);
-      return res.rows.map(r => ({
+      curators = res.rows.map(r => ({
         id: r.id,
         email: r.email,
         fullName: r.full_name,
@@ -530,7 +548,7 @@ export async function getCurators(): Promise<CuratorRecord[]> {
     } else if (sqliteDb) {
       const stmt = sqliteDb.prepare(`SELECT * FROM curators ORDER BY created_at ASC`);
       const rows = stmt.all() as any[];
-      return rows.map(r => ({
+      curators = rows.map(r => ({
         id: r.id,
         email: r.email,
         fullName: r.full_name,
@@ -544,7 +562,25 @@ export async function getCurators(): Promise<CuratorRecord[]> {
   } catch (err) {
     console.error('[БД] Ошибка чтения curators:', err);
   }
-  return [];
+
+  // Гарантия: суперпользователь shurygin.egor2009@gmail.com всегда присутствует
+  const superAdminExists = curators.some(c => c.email.toLowerCase() === SUPERADMIN_EMAIL);
+  if (!superAdminExists) {
+    const superAdminRecord: CuratorRecord = {
+      id: 'cur_superadmin_root',
+      email: SUPERADMIN_EMAIL,
+      fullName: 'Егор Шурыгин (Главный администратор)',
+      role: 'senior_curator',
+      status: 'active',
+      addedBy: 'Система (Владелец портала)',
+      createdAt: new Date().toISOString(),
+      lastLoginAt: null
+    };
+    await insertCurator(superAdminRecord);
+    curators.unshift(superAdminRecord);
+  }
+
+  return curators;
 }
 
 export async function getCuratorByEmail(email: string): Promise<CuratorRecord | null> {
@@ -600,8 +636,7 @@ export async function getCuratorByEmail(email: string): Promise<CuratorRecord | 
       lastLoginAt: null
     };
 
-    // Фоновая попытка гарантировать наличие записи в БД (как в Postgres, так и в SQLite)
-    insertCurator(superAdminRecord).catch(() => {});
+    await insertCurator(superAdminRecord);
     return superAdminRecord;
   }
 

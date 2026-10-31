@@ -216,7 +216,7 @@ export default function App() {
   const [criteriaSearch, setCriteriaSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
 
-  const isSenior = currentUser?.role === 'senior_curator';
+  const isSenior = currentUser?.role === 'senior_curator' || currentUser?.email?.toLowerCase() === 'shurygin.egor2009@gmail.com';
 
   const fetchCriteriaConfig = async () => {
     try {
@@ -477,6 +477,10 @@ export default function App() {
       setTasks(prev => [data.task, ...prev.filter(t => t.id !== data.task.id)]);
       setActiveTab('dashboard');
       await fetchTasksAndTeachers();
+      if (isSenior) {
+        fetchAuditLogs();
+        fetchCurators();
+      }
     } catch (err: any) {
       setSubmitError(err.message || 'Сбой подключения к серверу.');
     } finally {
