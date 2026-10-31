@@ -35,7 +35,8 @@ import {
   RotateCcw,
   Sliders,
   Lock,
-  ArrowRight
+  ArrowRight,
+  Trash2
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { PromptEditor } from './components/PromptEditor';
@@ -554,6 +555,32 @@ export default function App() {
       const data = await res.json();
       if (!res.ok || !data.success) {
         setCuratorActionError(data.message || 'Ошибка обновления статуса.');
+        return;
+      }
+      setCuratorActionMessage(data.message);
+      await fetchCurators();
+    } catch (err: any) {
+      setCuratorActionError(err.message || 'Ошибка сети.');
+    }
+  };
+
+  // Удаление куратора из белого списка
+  const handleDeleteCurator = async (email: string) => {
+    if (!window.confirm(`Вы действительно хотите удалить куратора ${email} из белого списка системы?`)) {
+      return;
+    }
+    setCuratorActionError('');
+    setCuratorActionMessage('');
+    try {
+      const res = await fetch(`/api/curators/${encodeURIComponent(email)}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${authToken}`
+        }
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setCuratorActionError(data.message || 'Ошибка удаления куратора.');
         return;
       }
       setCuratorActionMessage(data.message);
@@ -1585,6 +1612,17 @@ export default function App() {
                               className="px-3 py-1.5 bg-indigo-900/40 hover:bg-indigo-900/60 border border-indigo-700/40 text-indigo-300 hover:text-white disabled:opacity-40 rounded-lg text-xs transition-colors"
                             >
                               Снять права старшего
+                            </button>
+                          )}
+
+                          {c.email !== currentUser.email && c.email !== 'shurygin.egor2009@gmail.com' && (
+                            <button
+                              onClick={() => handleDeleteCurator(c.email)}
+                              className="px-2.5 py-1.5 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-500/30 text-rose-300 hover:text-rose-100 rounded-lg text-xs transition-colors inline-flex items-center gap-1"
+                              title="Удалить из белого списка"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Удалить</span>
                             </button>
                           )}
                         </td>

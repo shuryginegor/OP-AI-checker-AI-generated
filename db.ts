@@ -315,6 +315,18 @@ async function seedInitialData() {
     await updateCuratorStatusInDB(superAdminEmail, 'active');
   }
 
+  // Очистка любых ошибочно авто-созданных кураторов из прежнего бага
+  try {
+    if (isPostgres && pgPool) {
+      await pgPool.query(`DELETE FROM curators WHERE added_by LIKE '%Автобелый список%' AND LOWER(email) != $1`, [superAdminEmail]);
+    } else if (sqliteDb) {
+      const stmt = sqliteDb.prepare(`DELETE FROM curators WHERE added_by LIKE '%Автобелый список%' AND LOWER(email) != ?`);
+      stmt.run(superAdminEmail);
+    }
+  } catch (e) {
+    console.warn('[БД] Предупреждение при очистке автобелого списка:', e);
+  }
+
   // Автоматическая гидрация проверок лекций из бэкапа при старте
   try {
     await hydrateLectureTasksFromBackup();
@@ -539,15 +551,15 @@ export async function getCuratorByEmail(email: string): Promise<CuratorRecord | 
     console.error('[БД] Ошибка поиска куратора:', err);
   }
 
-  // 100% гарантия доступа для главного администратора и разрешенных кураторов:
-  if (normalized === SUPERADMIN_EMAIL || normalized.endsWith('@olympiadpractices.ru') || normalized.endsWith('@gmail.com')) {
+  // 100% гарантия доступа ТОЛЬКО для главного администратора shurygin.egor2009@gmail.com:
+  if (normalized === SUPERADMIN_EMAIL) {
     const superAdminRecord: CuratorRecord = {
-      id: normalized === SUPERADMIN_EMAIL ? 'cur_superadmin_root' : `cur_${Date.now()}`,
-      email: normalized,
-      fullName: normalized === SUPERADMIN_EMAIL ? 'Егор Шурыгин (Главный администратор)' : `Куратор (${normalized.split('@')[0]})`,
-      role: normalized === SUPERADMIN_EMAIL ? 'senior_curator' : 'curator',
+      id: 'cur_superadmin_root',
+      email: SUPERADMIN_EMAIL,
+      fullName: 'Егор Шурыгин (Главный администратор)',
+      role: 'senior_curator',
       status: 'active',
-      addedBy: 'Система (Владелец портала / Автобелый список)',
+      addedBy: 'Система (Владелец портала)',
       createdAt: new Date().toISOString(),
       lastLoginAt: null
     };
@@ -631,6 +643,23 @@ export async function touchCuratorLoginInDB(email: string): Promise<void> {
   } catch (err) {
     console.error('[БД] Ошибка touch login:', err);
   }
+}
+
+export async function deleteCuratorFromDB(email: string): Promise<boolean> {
+  const normalized = email.toLowerCase().trim();
+  try {
+    if (isPostgres && pgPool) {
+      const res = await pgPool.query(`DELETE FROM curators WHERE LOWER(email) = $1`, [normalized]);
+      return (res.rowCount || 0) > 0;
+    } else if (sqliteDb) {
+      const stmt = sqliteDb.prepare(`DELETE FROM curators WHERE LOWER(email) = ?`);
+      const info = stmt.run(normalized);
+      return (info.changes || 0) > 0;
+    }
+  } catch (err) {
+    console.error('[БД] Ошибка удаления куратора:', err);
+  }
+  return false;
 }
 
 // -------------------------------------------------------------

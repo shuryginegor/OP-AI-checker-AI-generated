@@ -16,6 +16,7 @@ import {
   insertCurator,
   updateCuratorRoleInDB,
   updateCuratorStatusInDB,
+  deleteCuratorFromDB,
   touchCuratorLoginInDB,
   getLectureTasks,
   getLectureTaskByUrl,
@@ -309,7 +310,38 @@ async function startServer() {
 
     const existing = await getCuratorByEmail(normalizedEmail);
     if (existing) {
-      return res.status(400).json({ success: false, message: `Куратор с почтой ${normalizedEmail} уже зарегистрирован в системе.` });
+      if (normalizedEmail === 'shurygin.egor2009@gmail.com') {
+        return res.status(400).json({ success: false, message: "Главный администратор shurygin.egor2009@gmail.com уже зарегистрирован в системе." });
+      }
+
+      // Если куратор уже существовал (или был ранее добавлен), обновляем его имя, роль и активируем
+      const updatedRecord: CuratorRecord = {
+        ...existing,
+        fullName: displayName,
+        role: assignedRole,
+        status: "active",
+        addedBy: currentUser.fullName || currentUser.email
+      };
+
+      const updated = await insertCurator(updatedRecord);
+      if (!updated) {
+        return res.status(500).json({ success: false, message: "Ошибка обновления данных куратора в базе данных." });
+      }
+
+      await logAuditEvent(
+        currentUser.email,
+        currentUser.role,
+        "CURATOR_UPDATED",
+        normalizedEmail,
+        `Куратор обновлен: ${displayName} (${normalizedEmail}) с ролью ${assignedRole}`,
+        ip
+      );
+
+      return res.json({
+        success: true,
+        message: `Куратор ${normalizedEmail} (${displayName}) успешно обновлен и активирован в белом списке.`,
+        curator: updatedRecord
+      });
     }
 
     const newRecord: CuratorRecord = {
@@ -342,6 +374,36 @@ async function startServer() {
       success: true,
       message: `Email ${normalizedEmail} успешно добавлен в белый список системы.`,
       curator: newRecord
+    });
+  });
+
+  // Удаление куратора из белого списка (ТОЛЬКО ДЛЯ СТАРШИХ КУРАТОРОВ)
+  app.delete("/api/curators/:email", requireAuth, requireSeniorCurator, async (req, res) => {
+    const ip = getClientIp(req);
+    const currentUser: CuratorRecord = (req as any).user;
+    const targetEmail = decodeURIComponent(req.params.email).toLowerCase().trim();
+
+    if (targetEmail === currentUser.email.toLowerCase() || targetEmail === 'shurygin.egor2009@gmail.com') {
+      return res.status(400).json({ success: false, message: "Нельзя удалить собственного пользователя или главного администратора." });
+    }
+
+    const deleted = await deleteCuratorFromDB(targetEmail);
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: "Куратор не найден в БД." });
+    }
+
+    await logAuditEvent(
+      currentUser.email,
+      currentUser.role,
+      "CURATOR_DELETED",
+      targetEmail,
+      `Куратор ${targetEmail} удален из белого списка старшим куратором ${currentUser.fullName || currentUser.email}`,
+      ip
+    );
+
+    res.json({
+      success: true,
+      message: `Куратор ${targetEmail} успешно удален из белого списка.`
     });
   });
 
