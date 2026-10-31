@@ -182,6 +182,8 @@ dist-ssr/
 *.db-shm
 *.db-wal
 data/*.sqlite*
+data/*.json
+!data/criteria_active.json
 
 # Logs
 *.log

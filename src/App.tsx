@@ -330,6 +330,14 @@ export default function App() {
     }
   }, [authToken, isSenior]);
 
+  // Повторный запрос при переключении на вкладки "Управление кураторами" и "Аудит действий"
+  useEffect(() => {
+    if (authToken && isSenior) {
+      if (activeTab === 'curators') fetchCurators();
+      if (activeTab === 'audit') fetchAuditLogs();
+    }
+  }, [activeTab, authToken, isSenior]);
+
   // Опрос статусов активных задач каждые 4 секунды
   useEffect(() => {
     if (!authToken) return;
