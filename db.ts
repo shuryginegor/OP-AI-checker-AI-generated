@@ -542,29 +542,61 @@ export async function getAuditLogs(limit = 100): Promise<AuditLogRecord[]> {
 // -------------------------------------------------------------
 let inMemoryCuratorsMap = new Map<string, CuratorRecord>();
 
-export async function hydrateCuratorsFromBackup(): Promise<void> {
-  const backupPath = path.join(DATA_DIR, 'curators.json');
-  if (!fs.existsSync(backupPath)) return;
-  try {
-    const raw = fs.readFileSync(backupPath, 'utf-8');
-    const listFromFile: CuratorRecord[] = JSON.parse(raw);
-    if (Array.isArray(listFromFile)) {
-      for (const item of listFromFile) {
-        if (item && item.email) {
-          inMemoryCuratorsMap.set(item.email.toLowerCase().trim(), item);
+export async function hydrateCuratorsFromBackup(): Promise<number> {
+  const primaryPath = path.join(DATA_DIR, 'curators.json');
+  const altPath = path.join(DATA_DIR, 'curators_backup.json');
+
+  let curatorsToHydrate: CuratorRecord[] = [];
+  let loadedFile = '';
+
+  for (const file of [primaryPath, altPath]) {
+    if (fs.existsSync(file)) {
+      try {
+        const raw = fs.readFileSync(file, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          curatorsToHydrate = parsed;
+          loadedFile = file;
+          break;
         }
+      } catch (e) {
+        console.warn(`[БД Гидрация] Ошибка чтения кураторов из ${file}:`, e);
       }
     }
-  } catch (err) {
-    console.error('[БД] Ошибка гидрации кураторов из бэкапа:', err);
   }
+
+  if (curatorsToHydrate.length === 0) {
+    console.log('[БД Гидрация] Файл бэкапа кураторов не найден или пуст.');
+    return 0;
+  }
+
+  let restoredCount = 0;
+  for (const item of curatorsToHydrate) {
+    if (item && item.email) {
+      const normEmail = item.email.toLowerCase().trim();
+      inMemoryCuratorsMap.set(normEmail, item);
+      await insertCurator(item);
+      restoredCount++;
+    }
+  }
+  console.log(`[БД Гидрация] ✅ Восстановлено ${restoredCount} кураторов из бэкапа ${loadedFile}`);
+  return restoredCount;
 }
 
 export async function saveCuratorsBackup(): Promise<void> {
   try {
-    const backupPath = path.join(DATA_DIR, 'curators.json');
     const list = Array.from(inMemoryCuratorsMap.values());
-    fs.writeFileSync(backupPath, JSON.stringify(list, null, 2), 'utf-8');
+    if (list.length === 0) return;
+
+    const backupPath1 = path.join(DATA_DIR, 'curators.json');
+    const backupPath2 = path.join(DATA_DIR, 'curators_backup.json');
+    const tempPath = path.join(DATA_DIR, 'curators.tmp.json');
+
+    fs.writeFileSync(tempPath, JSON.stringify(list, null, 2), 'utf-8');
+    fs.copyFileSync(tempPath, backupPath1);
+    fs.copyFileSync(tempPath, backupPath2);
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    console.log(`[БД Бэкап] ✅ Автоматически сохранен бэкап кураторов (${list.length} аккаунтов) в ${backupPath1}`);
   } catch (err) {
     console.error('[БД] Ошибка сохранения бэкапа кураторов:', err);
   }
@@ -723,20 +755,46 @@ export async function insertCurator(curator: CuratorRecord): Promise<boolean> {
 
   try {
     if (isPostgres && pgPool) {
-      await pgPool.query(
-        `INSERT INTO curators (id, email, full_name, role, status, added_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (email) DO UPDATE SET full_name = $3, role = $4, status = $5, added_by = $6`,
-        [safeRecord.id, safeRecord.email, safeRecord.fullName, safeRecord.role, safeRecord.status, safeRecord.addedBy]
-      );
+      try {
+        await pgPool.query(
+          `INSERT INTO curators (id, email, full_name, role, status, added_by)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (email) DO UPDATE SET full_name = $3, role = $4, status = $5, added_by = $6`,
+          [safeRecord.id, safeRecord.email, safeRecord.fullName, safeRecord.role, safeRecord.status, safeRecord.addedBy]
+        );
+      } catch (pgErr) {
+        const updated = await pgPool.query(
+          `UPDATE curators SET full_name = $1, role = $2, status = $3, added_by = $4 WHERE LOWER(email) = $5`,
+          [safeRecord.fullName, safeRecord.role, safeRecord.status, safeRecord.addedBy, emailNorm]
+        );
+        if ((updated as any).rowCount === 0) {
+          await pgPool.query(
+            `INSERT INTO curators (id, email, full_name, role, status, added_by) VALUES ($1, $2, $3, $4, $5, $6)`,
+            [safeRecord.id, safeRecord.email, safeRecord.fullName, safeRecord.role, safeRecord.status, safeRecord.addedBy]
+          );
+        }
+      }
       return true;
     } else if (sqliteDb) {
-      const stmt = sqliteDb.prepare(
-        `INSERT INTO curators (id, email, full_name, role, status, added_by)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (email) DO UPDATE SET full_name = excluded.full_name, role = excluded.role, status = excluded.status, added_by = excluded.added_by`
-      );
-      stmt.run(safeRecord.id, safeRecord.email, safeRecord.fullName, safeRecord.role, safeRecord.status, safeRecord.addedBy);
+      try {
+        const stmt = sqliteDb.prepare(
+          `INSERT INTO curators (id, email, full_name, role, status, added_by)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (email) DO UPDATE SET full_name = excluded.full_name, role = excluded.role, status = excluded.status, added_by = excluded.added_by`
+        );
+        stmt.run(safeRecord.id, safeRecord.email, safeRecord.fullName, safeRecord.role, safeRecord.status, safeRecord.addedBy);
+      } catch (sqErr) {
+        const updateStmt = sqliteDb.prepare(
+          `UPDATE curators SET full_name = ?, role = ?, status = ?, added_by = ? WHERE LOWER(email) = ?`
+        );
+        const res = updateStmt.run(safeRecord.fullName, safeRecord.role, safeRecord.status, safeRecord.addedBy, emailNorm);
+        if (res.changes === 0) {
+          const insertStmt = sqliteDb.prepare(
+            `INSERT INTO curators (id, email, full_name, role, status, added_by) VALUES (?, ?, ?, ?, ?, ?)`
+          );
+          insertStmt.run(safeRecord.id, safeRecord.email, safeRecord.fullName, safeRecord.role, safeRecord.status, safeRecord.addedBy);
+        }
+      }
       return true;
     }
   } catch (err) {
@@ -812,19 +870,17 @@ export async function touchCuratorLoginInDB(email: string): Promise<void> {
 export async function deleteCuratorFromDB(email: string): Promise<boolean> {
   const normalized = email.toLowerCase().trim();
   inMemoryCuratorsMap.delete(normalized);
-  saveCuratorsBackup().catch(() => {});
   try {
     if (isPostgres && pgPool) {
       await pgPool.query(`DELETE FROM curators WHERE LOWER(email) = $1`, [normalized]);
-      return true;
     } else if (sqliteDb) {
       const stmt = sqliteDb.prepare(`DELETE FROM curators WHERE LOWER(email) = ?`);
       stmt.run(normalized);
-      return true;
     }
   } catch (err) {
     console.error('[БД] Ошибка удаления куратора:', err);
   }
+  await saveCuratorsBackup();
   return true;
 }
 
@@ -1393,17 +1449,32 @@ export async function getCriteriaConfigFromDB(key: string = 'active'): Promise<a
 // -------------------------------------------------------------
 // 12. АВТОМАТИЧЕСКИЙ БЭКАП И ГИДРАЦИЯ ПРОВЕРОК ЛЕКЦИЙ
 // -------------------------------------------------------------
-const BACKUP_FILE = path.join(DATA_DIR, 'lecture_tasks_backup.json');
+const BACKUP_FILE_PRIMARY = path.join(DATA_DIR, 'lecture_tasks_backup.json');
+const BACKUP_FILE_SECONDARY = path.join(DATA_DIR, 'lecture_tasks.json');
 
 export async function createLectureTasksBackup(): Promise<number> {
   try {
     const tasks = await getLectureTasks();
-    // Ограничиваем бэкап ровно до 100 самых последних проверок (старые вытесняются новым)
-    const recentTasks = tasks.slice(0, 100);
+
+    // Защита: Если при получении из БД временно вернулся пустой массив, но в памяти есть задачи — берем их
+    let tasksToSave = tasks;
+    if (tasksToSave.length === 0 && inMemoryTasksMap.size > 0) {
+      tasksToSave = Array.from(inMemoryTasksMap.values());
+    }
+
+    if (tasksToSave.length === 0) {
+      return 0;
+    }
+
+    const recentTasks = tasksToSave.slice(0, 2000);
     const tempFile = path.join(DATA_DIR, 'lecture_tasks_backup.tmp.json');
+
     fs.writeFileSync(tempFile, JSON.stringify(recentTasks, null, 2), 'utf-8');
-    fs.renameSync(tempFile, BACKUP_FILE);
-    console.log(`[БД Бэкап] ✅ Автоматически сохранен бэкап проверок лекций (${recentTasks.length} записей, ротация ровно до 100) в ${BACKUP_FILE}`);
+    fs.copyFileSync(tempFile, BACKUP_FILE_PRIMARY);
+    fs.copyFileSync(tempFile, BACKUP_FILE_SECONDARY);
+    if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+
+    console.log(`[БД Бэкап] ✅ Автоматически сохранен бэкап проверок лекций (${recentTasks.length} записей) в ${BACKUP_FILE_PRIMARY}`);
     return recentTasks.length;
   } catch (err) {
     console.error('[БД Бэкап] Ошибка создания бэкапа проверок лекций:', err);
@@ -1412,46 +1483,52 @@ export async function createLectureTasksBackup(): Promise<number> {
 }
 
 export async function hydrateLectureTasksFromBackup(): Promise<number> {
-  if (!fs.existsSync(BACKUP_FILE)) {
-    console.log('[БД Гидрация] Файл бэкапа не найден, гидрация пропущена.');
-    return 0;
-  }
+  let tasksToHydrate: LectureTaskRecord[] = [];
+  let loadedFile = '';
 
-  try {
-    const raw = fs.readFileSync(BACKUP_FILE, 'utf-8');
-    const backupTasks: LectureTaskRecord[] = JSON.parse(raw);
-    if (!Array.isArray(backupTasks) || backupTasks.length === 0) {
-      return 0;
-    }
-
-    // 1. Мгновенно загружаем все задачи из файла бэкапа в память
-    for (const task of backupTasks) {
-      if (task && task.id) {
-        inMemoryTasksMap.set(task.id, task);
-      }
-    }
-
-    // 2. Восстанавливаем записи в реляционную таблицу PostgreSQL / SQLite
-    const currentTasks = await getLectureTasks();
-    const currentIds = new Set(currentTasks.map(t => t.id));
-
-    let restoredCount = 0;
-    for (const task of backupTasks) {
-      if (task && task.id) {
-        await insertLectureTask(task);
-        if (task.teacherName) {
-          await insertTeacherIfNotExists(task.teacherName, task.subject);
+  const candidates = [BACKUP_FILE_PRIMARY, BACKUP_FILE_SECONDARY];
+  for (const file of candidates) {
+    if (fs.existsSync(file)) {
+      try {
+        const raw = fs.readFileSync(file, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          tasksToHydrate = parsed;
+          loadedFile = file;
+          break;
         }
-        restoredCount++;
+      } catch (e) {
+        console.warn(`[БД Гидрация] Предупреждение при чтении ${file}:`, e);
       }
     }
+  }
 
-    console.log(`[БД Гидрация] ✅ Восстановлено ${restoredCount} проверок лекций и загружено в дашборд из резервной копии ${BACKUP_FILE}`);
-    return restoredCount;
-  } catch (err) {
-    console.error('[БД Гидрация] Ошибка гидрации проверок из бэкапа:', err);
+  if (tasksToHydrate.length === 0) {
+    console.log('[БД Гидрация] Файлы бэкапа проверок лекций не содержат записей.');
     return 0;
   }
+
+  // 1. Загружаем все задачи из бэкапа в память
+  for (const task of tasksToHydrate) {
+    if (task && task.id) {
+      inMemoryTasksMap.set(task.id, task);
+    }
+  }
+
+  // 2. Восстанавливаем записи в реляционную таблицу PostgreSQL / SQLite
+  let restoredCount = 0;
+  for (const task of tasksToHydrate) {
+    if (task && task.id) {
+      await insertLectureTask(task);
+      if (task.teacherName) {
+        await insertTeacherIfNotExists(task.teacherName, task.subject);
+      }
+      restoredCount++;
+    }
+  }
+
+  console.log(`[БД Гидрация] ✅ Восстановлено ${restoredCount} проверок лекций в дашборд из резервной копии ${loadedFile}`);
+  return restoredCount;
 }
 
 
