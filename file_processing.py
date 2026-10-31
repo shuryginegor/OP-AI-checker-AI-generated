@@ -4,7 +4,13 @@ import logging
 import os
 import subprocess
 import time
-from moviepy import VideoFileClip
+try:
+    from moviepy import VideoFileClip
+except ImportError:
+    try:
+        from moviepy.editor import VideoFileClip
+    except ImportError:
+        VideoFileClip = None
 import logger_config
 
 logger = logging.getLogger(__name__)

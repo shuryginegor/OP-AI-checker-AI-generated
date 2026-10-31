@@ -182,6 +182,8 @@ export default function App() {
   const [selectedTeacherFilter, setSelectedTeacherFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeDetailTask, setActiveDetailTask] = useState<any | null>(null);
+  const [rawJsonModalTask, setRawJsonModalTask] = useState<any | null>(null);
+  const [copiedRawJson, setCopiedRawJson] = useState<boolean>(false);
 
   // Форма отправки встречи КТалк
   const [lectureUrl, setLectureUrl] = useState<string>('');
@@ -1063,8 +1065,18 @@ export default function App() {
                     {filteredTasks.map((t) => (
                       <tr
                         key={t.id}
-                        onClick={() => setActiveDetailTask(t)}
-                        className="hover:bg-[#241E4F]/50 transition-colors cursor-pointer group"
+                        onClick={() => {
+                          if (t.status === 'completed') {
+                            setActiveDetailTask(t);
+                          } else if (t.isCorrupted) {
+                            setRawJsonModalTask(t);
+                          }
+                        }}
+                        className={`transition-colors group ${
+                          t.status === 'completed' || t.isCorrupted
+                            ? 'hover:bg-[#241E4F]/50 cursor-pointer'
+                            : 'opacity-80 cursor-default'
+                        }`}
                       >
                         <td className="px-6 py-4 font-mono text-indigo-200/80 whitespace-nowrap">
                           {t.date}
@@ -1093,7 +1105,11 @@ export default function App() {
                           )}
                         </td>
                         <td className="px-6 py-4 text-center">
-                          {t.status === 'completed' ? (
+                          {t.isCorrupted ? (
+                            <span className="inline-block px-2.5 py-1 rounded-lg font-mono font-bold text-[11px] bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                              Сбой JSON
+                            </span>
+                          ) : t.status === 'completed' ? (
                             <span
                               className={`inline-block px-2.5 py-1 rounded-lg font-mono font-bold text-xs ${
                                 t.totalScore >= 90
@@ -1110,7 +1126,12 @@ export default function App() {
                           )}
                         </td>
                         <td className="px-6 py-4">
-                          {t.status === 'completed' ? (
+                          {t.isCorrupted ? (
+                            <span className="inline-flex items-center gap-1.5 text-[11px] text-amber-300 font-semibold bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 rounded-lg">
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              Разбор поврежден
+                            </span>
+                          ) : t.status === 'completed' ? (
                             <span className="inline-flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium">
                               <CheckCircle2 className="w-3.5 h-3.5" />
                               Проверено GigaChat
@@ -1135,16 +1156,38 @@ export default function App() {
                           )}
                         </td>
                         <td className="px-6 py-4 text-right">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setActiveDetailTask(t);
-                            }}
-                            className="text-[#FF5252] group-hover:text-white font-semibold text-xs flex items-center gap-1 ml-auto"
-                          >
-                            <span>Подробнее</span>
-                            <ChevronRight className="w-3.5 h-3.5" />
-                          </button>
+                          {t.status !== 'completed' && !t.isCorrupted ? (
+                            <button
+                              disabled
+                              className="px-2.5 py-1.5 bg-indigo-950/30 border border-indigo-800/20 text-indigo-400/40 rounded-xl text-xs font-medium cursor-not-allowed ml-auto flex items-center gap-1.5"
+                              title="Проверка лекции еще выполняется"
+                            >
+                              <span>В процессе...</span>
+                            </button>
+                          ) : t.isCorrupted ? (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setRawJsonModalTask(t);
+                              }}
+                              className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ml-auto shadow-sm"
+                              title="Открыть сырой поломанный JSON от нейросети"
+                            >
+                              <FileText className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Сырой ответ ИИ</span>
+                            </button>
+                          ) : (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setActiveDetailTask(t);
+                              }}
+                              className="text-[#FF5252] group-hover:text-white font-semibold text-xs flex items-center gap-1 ml-auto"
+                            >
+                              <span>Подробнее</span>
+                              <ChevronRight className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -2027,6 +2070,49 @@ export default function App() {
 
             {/* Контент модалки */}
             <div className="p-6 space-y-6 overflow-y-auto flex-1">
+              {/* Метаданные встречи КТалк (извлеченные через KTalk API) */}
+              {activeDetailTask.talkMetadata && (
+                <div className="bg-[#14102C] border border-[#38BDF8]/40 rounded-2xl p-4 space-y-3 shadow-md">
+                  <div className="flex items-center justify-between border-b border-indigo-900/50 pb-2">
+                    <div className="flex items-center gap-2 text-[#38BDF8] font-bold text-xs uppercase tracking-wider">
+                      <Video className="w-4 h-4 text-[#38BDF8]" />
+                      <span>Метаданные встречи КТалк</span>
+                    </div>
+                    <span className="text-[10px] font-mono bg-cyan-950 text-cyan-300 border border-cyan-800 px-2 py-0.5 rounded">
+                      KTalk API
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+                    <div>
+                      <span className="text-indigo-400 block text-[10px]">Название встречи:</span>
+                      <strong className="text-white">{activeDetailTask.talkMetadata.title || 'Онлайн-занятие'}</strong>
+                    </div>
+                    <div>
+                      <span className="text-indigo-400 block text-[10px]">Дата и время в КТалк:</span>
+                      <span className="text-indigo-200 font-mono">{activeDetailTask.talkMetadata.date || activeDetailTask.date}</span>
+                    </div>
+                    <div>
+                      <span className="text-indigo-400 block text-[10px]">Длительность:</span>
+                      <span className="text-emerald-400 font-semibold">{activeDetailTask.talkMetadata.duration || 'Полноформатное занятие'}</span>
+                    </div>
+                    <div>
+                      <span className="text-indigo-400 block text-[10px]">Организатор / Спикер:</span>
+                      <span className="text-white font-medium">{activeDetailTask.talkMetadata.author || activeDetailTask.teacherName}</span>
+                    </div>
+                    <div>
+                      <span className="text-indigo-400 block text-[10px]">Логин в КТалк:</span>
+                      <span className="text-indigo-300 font-mono">{activeDetailTask.talkMetadata.login || '—'}</span>
+                    </div>
+                    <div>
+                      <span className="text-indigo-400 block text-[10px]">ID записи (recordingKey):</span>
+                      <span className="text-cyan-300 font-mono text-[11px] truncate block" title={activeDetailTask.talkMetadata.recordingKey}>
+                        {activeDetailTask.talkMetadata.recordingKey || '—'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Ссылка на КТалк */}
               <div className="p-3 bg-[#14102C] border border-indigo-900/60 rounded-xl flex items-center justify-between text-xs">
                 <span className="text-indigo-300 font-medium">Запись вебинара:</span>
@@ -2076,18 +2162,18 @@ export default function App() {
                 </div>
               )}
 
-              {/* Детализация по 21 критерию */}
+              {/* Детализация по критериям */}
               {activeDetailTask.criteria && activeDetailTask.criteria.length > 0 && (
                 <div className="space-y-3">
                   <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-1.5">
                     <ShieldCheck className="w-4 h-4 text-[#38BDF8]" />
-                    Оценки по 21 критерию качества:
+                    Оценки по критериям качества:
                   </h4>
                   <div className="space-y-2">
                     {activeDetailTask.criteria.map((c: any) => (
                       <div
                         key={c.id}
-                        className={`p-3 rounded-xl border text-xs space-y-1.5 ${
+                        className={`p-3.5 rounded-xl border text-xs space-y-2 ${
                           c.passed
                             ? 'bg-[#14102C] border-indigo-900/60'
                             : 'bg-amber-950/20 border-amber-500/40'
@@ -2101,22 +2187,43 @@ export default function App() {
                             <span>{c.text}</span>
                           </span>
                           <span
-                            className={`font-mono font-bold ${
-                              c.passed ? 'text-emerald-400' : 'text-amber-400'
+                            className={`font-mono font-bold px-2 py-0.5 rounded ${
+                              c.passed ? 'text-emerald-300 bg-emerald-500/20' : 'text-amber-300 bg-amber-500/20'
                             }`}
                           >
                             {c.score} / 5
                           </span>
                         </div>
+
+                        {/* Таймкоды нарушений */}
                         {c.timecodes && c.timecodes.length > 0 && (
-                          <div className="text-[11px] text-amber-300 font-mono flex items-center gap-2">
-                            <Clock className="w-3 h-3 text-amber-400" />
-                            <span>Таймкоды: {c.timecodes.join(', ')}</span>
+                          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                            <span className="text-[10px] text-amber-300 font-semibold flex items-center gap-1">
+                              <Clock className="w-3.5 h-3.5 text-amber-400" />
+                              Таймкоды нарушений:
+                            </span>
+                            {c.timecodes.map((tc: string, tcIdx: number) => (
+                              <span
+                                key={tcIdx}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                              >
+                                🕒 {tc}
+                              </span>
+                            ))}
                           </div>
                         )}
+
+                        {/* Цитата из речи */}
                         {c.quote && (
-                          <div className="text-[11px] italic text-indigo-300/90 pl-3 border-l-2 border-amber-400">
+                          <div className="text-[11px] italic text-indigo-200/90 pl-3 py-1 border-l-2 border-[#38BDF8] bg-indigo-950/40 rounded-r-lg">
                             {c.quote}
+                          </div>
+                        )}
+
+                        {/* Разбор и комментарий методиста */}
+                        {c.comment && (
+                          <div className="text-[11px] text-slate-300 leading-relaxed pt-0.5">
+                            {c.comment}
                           </div>
                         )}
                       </div>
@@ -2133,6 +2240,95 @@ export default function App() {
                 className="px-5 py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-[#FF5252]/30"
               >
                 Закрыть отчет
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* МОДАЛЬНОЕ ОКНО СЫРОГО ПОЛОМАННОГО JSON ОТ ИИ */}
+      {rawJsonModalTask && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#1B153B] border border-amber-500/50 rounded-3xl max-w-3xl w-full max-h-[90vh] flex flex-col shadow-2xl animate-fade-in overflow-hidden">
+            {/* Шапка модалки */}
+            <div className="p-5 border-b border-indigo-900/60 flex items-center justify-between bg-[#14102C]/80">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center">
+                  <AlertTriangle className="w-5 h-5 text-amber-400" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full">
+                      Разбор поврежден • Сбой JSON
+                    </span>
+                    <span className="text-xs text-indigo-400 font-mono">#{rawJsonModalTask.id}</span>
+                  </div>
+                  <h3 className="text-base font-black text-white mt-0.5">
+                    Сырой ответ нейросети GigaChat ({rawJsonModalTask.teacherName})
+                  </h3>
+                </div>
+              </div>
+              <button
+                onClick={() => setRawJsonModalTask(null)}
+                className="p-2 hover:bg-white/10 rounded-xl text-indigo-300 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Контент модалки */}
+            <div className="p-6 space-y-4 overflow-y-auto flex-1 text-xs">
+              <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-amber-200 leading-relaxed space-y-1">
+                <div className="font-bold text-amber-300 flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-400" />
+                  <span>Автоматическое восстановление JSON структуры не удалось</span>
+                </div>
+                <p className="text-[11px] text-indigo-200">
+                  Модель GigaChat вернула ответ, содержащий синтаксические повреждения или отказ безопасности, который встроенный парсер не смог привести к валидной схеме. Вы можете просмотреть или скопировать полный оригинальный ответ ниже:
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-mono text-indigo-300">Оригинальный сырой текст ответа модели:</span>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(rawJsonModalTask.rawBrokenResponse || 'Пустой ответ');
+                      setCopiedRawJson(true);
+                      setTimeout(() => setCopiedRawJson(false), 2000);
+                    }}
+                    className="px-3 py-1 bg-[#14102C] hover:bg-indigo-900/60 border border-indigo-700/50 text-[#38BDF8] rounded-lg text-xs font-semibold transition-all inline-flex items-center gap-1.5"
+                  >
+                    {copiedRawJson ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-emerald-400">Скопировано!</span>
+                      </>
+                    ) : (
+                      <>
+                        <FileText className="w-3.5 h-3.5" />
+                        <span>Скопировать сырой ответ</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <pre className="bg-[#100D24] text-emerald-300 border border-indigo-950 p-4 rounded-2xl font-mono text-xs overflow-x-auto max-h-[50vh] whitespace-pre-wrap select-all leading-relaxed shadow-inner">
+                  {rawJsonModalTask.rawBrokenResponse || 'Ответ пуст или не был получен от сервиса.'}
+                </pre>
+              </div>
+            </div>
+
+            {/* Подвал модалки */}
+            <div className="p-4 border-t border-indigo-900/60 bg-[#14102C]/60 flex items-center justify-between">
+              <span className="text-[10px] text-indigo-400 font-mono">
+                Дата создания задачи: {rawJsonModalTask.date}
+              </span>
+              <button
+                onClick={() => setRawJsonModalTask(null)}
+                className="px-5 py-2 bg-indigo-800 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-md"
+              >
+                Закрыть
               </button>
             </div>
           </div>

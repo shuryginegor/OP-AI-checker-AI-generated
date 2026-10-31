@@ -40,15 +40,35 @@ CRITICAL_CRITERIA = [
 
 
 import os
+import json
 import logging
 
 logger = logging.getLogger(__name__)
 
 
+def get_dynamic_criteria():
+    """Загружает актуальный список динамических критериев из data/criteria_active.json."""
+    criteria_file = os.path.join(os.getcwd(), "data", "criteria_active.json")
+    if os.path.exists(criteria_file):
+        try:
+            with open(criteria_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                std = data.get("standardCriteria")
+                crit = data.get("criticalCriteria")
+                if std and isinstance(std, list) and len(std) > 0:
+                    std_lines = [f"{c.get('id', i+1)}. {c.get('text', c.get('title', ''))}" for i, c in enumerate(std)]
+                    crit_lines = [f"{c.get('id', i+1)}. {c.get('title', '')}: {c.get('desc', '')}" for i, c in enumerate(crit)] if crit else CRITICAL_CRITERIA
+                    return std_lines, crit_lines
+        except Exception as e:
+            logger.warning(f"Не удалось прочитать criteria_active.json: {e}")
+    return STANDARD_CRITERIA, CRITICAL_CRITERIA
+
+
 def build_default_factory_prompt() -> str:
     """Возвращает исходный базовый заводской системный промпт."""
-    standard_formatted = "\n".join(STANDARD_CRITERIA)
-    critical_formatted = "\n".join(CRITICAL_CRITERIA)
+    std_criteria, crit_criteria = get_dynamic_criteria()
+    standard_formatted = "\n".join(std_criteria)
+    critical_formatted = "\n".join(crit_criteria)
 
     return f"""Ты — строгий, бескомпромиссный главный методист и старший эксперт по контролю качества онлайн-занятий.
 Твоя задача — провести ПРЕДЕЛЬНО ДЕТАЛЬНЫЙ, КРИТИЧЕСКИЙ И ПРИДИРЧИВЫЙ аудит предоставленного занятия.
@@ -64,21 +84,15 @@ def build_default_factory_prompt() -> str:
 
 СТРОГИЕ ПРАВИЛА ВЫСТАВЛЕНИЯ ШТРАФНЫХ БАЛЛОВ ПО КАЖДОМУ КРИТЕРИЮ:
 По каждому критерию определи количество СНЯТЫХ баллов (`score`):
-• 0 — ИДЕАЛЬНО / ПОЛНОЕ ОТСУТСТВИЕ НАРУШЕНИЙ (0 баллов снимается). Ставь 0 ТОЛЬКО если на протяжении ВСЕГО урока по этому критерию нет НИ ЕДИНОГО замечания.
-• 1 — НЕБОЛЬШОЕ ИЛИ ЕДИНИЧНОЕ НАРУШЕНИЕ (снимается 1 балл). Если был хотя бы один эпизод отклонения (например: неформальный флуд, посторонний голос на фоне, единичный поиск файла, игнорирование молчащего ученика, отсутствие ДЗ).
-• 2 — СИСТЕМАТИЧЕСКОЕ ИЛИ ГРУБОЕ НАРУШЕНИЕ (снимается 2 балла). Если проблема повторялась регулярно, заняла существенную часть урока или существенно снизила пользу занятия.
+• 0 — ИДЕАЛЬНО / ПОЛНОЕ ОТСУТСТВИЕ НАРУШЕНИЙ (0 баллов снимается). Ставь 0 ТОЛЬКО если на протяжении ВСЕГО урока по этому критерию нет НИ ЕДИНОГО замечания. В поле `timecodes` передай пустой массив `[]`.
+• 1 — НЕБОЛЬШОЕ ИЛИ ЕДИНИЧНОЕ НАРУШЕНИЕ (снимается 1 балл). Если был хотя бы один эпизод отклонения (например: неформальный флуд, посторонний голос на фоне, единичный поиск файла, игнорирование молчащего ученика, отсутствие ДЗ). ОБЯЗАТЕЛЬНО укажи массив точных таймкодов в поле `timecodes` вида `["ЧЧ:ММ:СС"]`.
+• 2 — СИСТЕМАТИЧЕСКОЕ ИЛИ ГРУБОЕ НАРУШЕНИЕ (снимается 2 балла). Если проблема повторялась регулярно, заняла существенную часть урока или существенно снизила пользу занятия. ОБЯЗАТЕЛЬНО укажи массив точных таймкодов в поле `timecodes`.
 • null — КРИТЕРИЙ НЕ ПРИМЕНИМ из-за формата/специфики урока или информации от пользователя.
 
-ОБЯЗАТЕЛЬНОЕ ОБОСНОВАНИЕ В ПОЛЕ `details`:
-Ты ОБЯЗАН предоставить развёрнутое пояснение в поле `details`:
-1. Если `score` равен 1 или 2 — укажи точную причину снятия баллов с таймкодами нарушений.
-2. Если `score` равен `null` (критерий исключён/удалён из списка) — ОБЯЗАТЕЛЬНО укажи конкретную причину его неприменимости (например: "Формат занятия — запись лекции без участников, поэтому критерий взаимодействия с группой исключён").
-
-ОСОБЫЕ АКЦЕНТЫ ПРИ АНАЛИЗЕ (НЕ ПРОПУСКАТЬ!):
-- Критерий 2 и 17: Любые задержки с демонстрацией, поиск файлов, отправка пустых файлов, отсутствие слайдов/плана -> ОБЯЗАТЕЛЬНО снимать баллы!
-- Критерий 7 и 11: Преподаватель работает только с 1-2 активными (а остальные молчат или уходят без внимания) -> ОБЯЗАТЕЛЬНО снимать баллы!
-- Критерий 10 и 21: Панибратство, обсуждение посторонних людей, личных тем, флуд в чате/голосом, шутки учеников (например "найду по IP"), посторонние лица на фоне -> ОБЯЗАТЕЛЬНО снимать баллы!
-- Критерий 12 и 13: Невыдача домашнего задания, отсутствие закрепления -> ОБЯЗАТЕЛЬНО фиксировать и снижать балл!
+ОБЯЗАТЕЛЬНЫЕ ПОЛЯ В КАЖДОМ ОБЪЕКТЕ КРИТЕРИЯ:
+- `timecodes`: массив строк с точными таймкодами нарушений (например `["00:14:20", "00:42:15"]`). Если нарушений нет (score 0), передавай пустой массив `[]`.
+- `quote`: прямая цитата из урока, подтверждающая нарушение или выполнение.
+- `details`: развёрнутое обоснование оценки (почему сняты баллы или почему критерий не применим).
 
 СПИСОК КРИТИЧЕСКИХ НАРУШЕНИЙ:
 {critical_formatted}
@@ -93,35 +107,37 @@ def build_default_factory_prompt() -> str:
 
 
 def get_active_system_prompt() -> str:
-    """Возвращает текущий активный рабочий промпт (из файла data/system_prompt_active.txt или заводской)."""
-    active_path = os.path.join(os.getcwd(), "data", "system_prompt_active.txt")
-    if os.path.exists(active_path):
-        try:
-            with open(active_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if content:
-                    return content
-        except Exception as e:
-            logger.warning(f"Не удалось прочитать system_prompt_active.txt: {e}")
+    """Возвращает текущий активный рабочий промпт (из файла data/prompt_active.txt, system_prompt_active.txt или заводской)."""
+    for fn in ["prompt_active.txt", "system_prompt_active.txt"]:
+        active_path = os.path.join(os.getcwd(), "data", fn)
+        if os.path.exists(active_path):
+            try:
+                with open(active_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if content:
+                        return content
+            except Exception as e:
+                logger.warning(f"Не удалось прочитать {fn}: {e}")
     return build_default_factory_prompt()
 
 
 def get_base_system_prompt() -> str:
-    """Возвращает базовый эталонный системный промпт (из файла data/system_prompt_base.txt или заводской)."""
-    base_path = os.path.join(os.getcwd(), "data", "system_prompt_base.txt")
-    if os.path.exists(base_path):
-        try:
-            with open(base_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if content:
-                    return content
-        except Exception as e:
-            logger.warning(f"Не удалось прочитать system_prompt_base.txt: {e}")
+    """Возвращает базовый эталонный системный промпт (из файла data/prompt_base.txt, system_prompt_base.txt или заводской)."""
+    for fn in ["prompt_base.txt", "system_prompt_base.txt"]:
+        base_path = os.path.join(os.getcwd(), "data", fn)
+        if os.path.exists(base_path):
+            try:
+                with open(base_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if content:
+                        return content
+            except Exception as e:
+                logger.warning(f"Не удалось прочитать {fn}: {e}")
     return build_default_factory_prompt()
 
 
 def build_system_prompt(additional_info: str = "") -> str:
-    """Формирует текстовый системный промпт с правилами и списками критериев."""
+    """Формирует текстовый системный промпт с правилами и списками динамических критериев."""
     template = get_active_system_prompt()
     info_text = additional_info.strip() if additional_info and additional_info.strip() else "Отсутствует"
 
@@ -133,8 +149,10 @@ def build_system_prompt(additional_info: str = "") -> str:
     elif info_text != "Отсутствует" and "ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ ОТ ПОЛЬЗОВАТЕЛЯ" not in prompt:
         prompt += f"\n\nКРИТИЧЕСКИ ВАЖНО — ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ ОТ ПОЛЬЗОВАТЕЛЯ:\n\"{info_text}\"\n"
 
-    standard_formatted = "\n".join(STANDARD_CRITERIA)
-    critical_formatted = "\n".join(CRITICAL_CRITERIA)
+    std_criteria, crit_criteria = get_dynamic_criteria()
+    standard_formatted = "\n".join(std_criteria)
+    critical_formatted = "\n".join(crit_criteria)
+
     if "{standard_formatted}" in prompt:
         prompt = prompt.replace("{standard_formatted}", standard_formatted)
     if "{critical_formatted}" in prompt:

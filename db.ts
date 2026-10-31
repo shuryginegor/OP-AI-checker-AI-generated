@@ -40,6 +40,22 @@ export interface LectureTaskRecord {
   progressPct: number;
   curatorEmail: string;
   createdAt: string;
+  talkMetadata?: {
+    title?: string;
+    login?: string;
+    name?: string;
+    surname?: string;
+    author?: string;
+    date?: string;
+    duration?: string;
+    recordingKey?: string;
+    resolution?: string;
+    url?: string;
+    domain?: string;
+    [key: string]: any;
+  } | null;
+  isCorrupted?: boolean;
+  rawBrokenResponse?: string | null;
 }
 
 const DATA_DIR = path.join(process.cwd(), 'data');
@@ -178,6 +194,9 @@ async function initTablesPG() {
       positive_highlights TEXT,
       recommendations TEXT,
       criteria_data TEXT,
+      talk_metadata TEXT,
+      is_corrupted BOOLEAN DEFAULT FALSE,
+      raw_broken_response TEXT,
       created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -213,6 +232,16 @@ async function initTablesPG() {
       updated_by VARCHAR(255) NOT NULL
     );
   `);
+
+  try {
+    await pgPool.query(`
+      ALTER TABLE lecture_tasks ADD COLUMN IF NOT EXISTS talk_metadata TEXT;
+      ALTER TABLE lecture_tasks ADD COLUMN IF NOT EXISTS is_corrupted BOOLEAN DEFAULT FALSE;
+      ALTER TABLE lecture_tasks ADD COLUMN IF NOT EXISTS raw_broken_response TEXT;
+    `);
+  } catch (migErr) {
+    // Игнорируем если уже добавлены
+  }
 }
 
 // 3. Создание таблиц в SQLite
@@ -257,6 +286,9 @@ async function initTablesSQLite() {
       positive_highlights TEXT,
       recommendations TEXT,
       criteria_data TEXT,
+      talk_metadata TEXT,
+      is_corrupted INTEGER DEFAULT 0,
+      raw_broken_response TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -292,6 +324,10 @@ async function initTablesSQLite() {
       updated_by TEXT NOT NULL
     );
   `);
+
+  try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN talk_metadata TEXT;"); } catch {}
+  try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN is_corrupted INTEGER DEFAULT 0;"); } catch {}
+  try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN raw_broken_response TEXT;"); } catch {}
 }
 
 // 4. Начальное наполнение БД (Seed)
@@ -706,7 +742,10 @@ export async function getLectureTasks(): Promise<LectureTaskRecord[]> {
           positiveHighlights: safeJsonParse(r.positive_highlights, []),
           recommendations: safeJsonParse(r.recommendations, []),
           criteria,
-          createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString()
+          createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
+          talkMetadata: safeJsonParse(r.talk_metadata, null),
+          isCorrupted: Boolean(r.is_corrupted),
+          rawBrokenResponse: r.raw_broken_response || null
         });
       }
     } else if (sqliteDb) {
@@ -735,7 +774,10 @@ export async function getLectureTasks(): Promise<LectureTaskRecord[]> {
           positiveHighlights: safeJsonParse(r.positive_highlights, []),
           recommendations: safeJsonParse(r.recommendations, []),
           criteria,
-          createdAt: r.created_at || new Date().toISOString()
+          createdAt: r.created_at || new Date().toISOString(),
+          talkMetadata: safeJsonParse(r.talk_metadata, null),
+          isCorrupted: Boolean(r.is_corrupted),
+          rawBrokenResponse: r.raw_broken_response || null
         });
       }
     }
@@ -769,21 +811,29 @@ export async function insertLectureTask(task: LectureTaskRecord): Promise<boolea
     const posJson = JSON.stringify(task.positiveHighlights || []);
     const recJson = JSON.stringify(task.recommendations || []);
     const criteriaJson = JSON.stringify(task.criteria || []);
+    const talkMetaJson = task.talkMetadata ? JSON.stringify(task.talkMetadata) : null;
+    const isCorruptedVal = task.isCorrupted ? 1 : 0;
+    const rawBroken = task.rawBrokenResponse || null;
 
     if (isPostgres && pgPool) {
       await pgPool.query(
         `INSERT INTO lecture_tasks (
            id, lecture_url, teacher_name, subject, group_name, date,
            total_score, status, progress_pct, curator_email,
-           critical_violations, positive_highlights, recommendations, criteria_data
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+           critical_violations, positive_highlights, recommendations, criteria_data,
+           talk_metadata, is_corrupted, raw_broken_response
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
          ON CONFLICT (id) DO UPDATE SET
            status = $8, progress_pct = $9, total_score = $7,
-           critical_violations = $11, positive_highlights = $12, recommendations = $13, criteria_data = $14`,
+           critical_violations = $11, positive_highlights = $12, recommendations = $13, criteria_data = $14,
+           talk_metadata = COALESCE($15, lecture_tasks.talk_metadata),
+           is_corrupted = $16,
+           raw_broken_response = COALESCE($17, lecture_tasks.raw_broken_response)`,
         [
           task.id, task.lectureUrl, task.teacherName, task.subject, task.groupName, task.date,
           task.totalScore, task.status, task.progressPct, task.curatorEmail,
-          critJson, posJson, recJson, criteriaJson
+          critJson, posJson, recJson, criteriaJson,
+          talkMetaJson, Boolean(task.isCorrupted), rawBroken
         ]
       );
       return true;
@@ -792,17 +842,22 @@ export async function insertLectureTask(task: LectureTaskRecord): Promise<boolea
         `INSERT INTO lecture_tasks (
            id, lecture_url, teacher_name, subject, group_name, date,
            total_score, status, progress_pct, curator_email,
-           critical_violations, positive_highlights, recommendations, criteria_data
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           critical_violations, positive_highlights, recommendations, criteria_data,
+           talk_metadata, is_corrupted, raw_broken_response
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            status = excluded.status, progress_pct = excluded.progress_pct, total_score = excluded.total_score,
            critical_violations = excluded.critical_violations, positive_highlights = excluded.positive_highlights,
-           recommendations = excluded.recommendations, criteria_data = excluded.criteria_data`
+           recommendations = excluded.recommendations, criteria_data = excluded.criteria_data,
+           talk_metadata = COALESCE(excluded.talk_metadata, lecture_tasks.talk_metadata),
+           is_corrupted = excluded.is_corrupted,
+           raw_broken_response = COALESCE(excluded.raw_broken_response, lecture_tasks.raw_broken_response)`
       );
       stmt.run(
         task.id, task.lectureUrl, task.teacherName, task.subject, task.groupName, task.date,
         task.totalScore, task.status, task.progressPct, task.curatorEmail,
-        critJson, posJson, recJson, criteriaJson
+        critJson, posJson, recJson, criteriaJson,
+        talkMetaJson, isCorruptedVal, rawBroken
       );
       return true;
     }
@@ -819,7 +874,13 @@ export async function updateLectureTaskProgressInDB(
   totalScore?: number,
   positiveHighlights?: string[],
   recommendations?: string[],
-  criteria?: any[]
+  criteria?: any[],
+  criticalViolations?: string[],
+  talkMetadata?: any,
+  isCorrupted?: boolean,
+  rawBrokenResponse?: string | null,
+  teacherName?: string,
+  subject?: string
 ): Promise<void> {
   // Обновляем в памяти
   const mem = inMemoryTasksMap.get(taskId);
@@ -830,12 +891,21 @@ export async function updateLectureTaskProgressInDB(
     if (positiveHighlights) mem.positiveHighlights = positiveHighlights;
     if (recommendations) mem.recommendations = recommendations;
     if (criteria) mem.criteria = criteria;
+    if (criticalViolations) mem.criticalViolations = criticalViolations;
+    if (talkMetadata !== undefined) mem.talkMetadata = talkMetadata;
+    if (isCorrupted !== undefined) mem.isCorrupted = isCorrupted;
+    if (rawBrokenResponse !== undefined) mem.rawBrokenResponse = rawBrokenResponse;
+    if (teacherName) mem.teacherName = teacherName;
+    if (subject) mem.subject = subject;
   }
 
   try {
     const posJson = positiveHighlights ? JSON.stringify(positiveHighlights) : null;
     const recJson = recommendations ? JSON.stringify(recommendations) : null;
     const critJson = criteria ? JSON.stringify(criteria) : null;
+    const critViolJson = criticalViolations ? JSON.stringify(criticalViolations) : null;
+    const talkMetaJson = talkMetadata ? JSON.stringify(talkMetadata) : null;
+    const isCorruptedNum = isCorrupted ? 1 : 0;
 
     if (isPostgres && pgPool) {
       if (status === 'completed' && totalScore !== undefined) {
@@ -843,9 +913,15 @@ export async function updateLectureTaskProgressInDB(
           `UPDATE lecture_tasks SET status = $1, progress_pct = $2, total_score = $3,
              positive_highlights = COALESCE($4, positive_highlights),
              recommendations = COALESCE($5, recommendations),
-             criteria_data = COALESCE($6, criteria_data)
-           WHERE id = $7`,
-          [status, progressPct, totalScore, posJson, recJson, critJson, taskId]
+             criteria_data = COALESCE($6, criteria_data),
+             critical_violations = COALESCE($7, critical_violations),
+             talk_metadata = COALESCE($8, talk_metadata),
+             is_corrupted = COALESCE($9, is_corrupted),
+             raw_broken_response = COALESCE($10, raw_broken_response),
+             teacher_name = COALESCE($11, teacher_name),
+             subject = COALESCE($12, subject)
+           WHERE id = $13`,
+          [status, progressPct, totalScore, posJson, recJson, critJson, critViolJson, talkMetaJson, isCorrupted, rawBrokenResponse, teacherName || null, subject || null, taskId]
         );
       } else {
         await pgPool.query(
@@ -859,10 +935,16 @@ export async function updateLectureTaskProgressInDB(
           `UPDATE lecture_tasks SET status = ?, progress_pct = ?, total_score = ?,
              positive_highlights = COALESCE(?, positive_highlights),
              recommendations = COALESCE(?, recommendations),
-             criteria_data = COALESCE(?, criteria_data)
+             criteria_data = COALESCE(?, criteria_data),
+             critical_violations = COALESCE(?, critical_violations),
+             talk_metadata = COALESCE(?, talk_metadata),
+             is_corrupted = COALESCE(?, is_corrupted),
+             raw_broken_response = COALESCE(?, raw_broken_response),
+             teacher_name = COALESCE(?, teacher_name),
+             subject = COALESCE(?, subject)
            WHERE id = ?`
         );
-        stmt.run(status, progressPct, totalScore, posJson, recJson, critJson, taskId);
+        stmt.run(status, progressPct, totalScore, posJson, recJson, critJson, critViolJson, talkMetaJson, isCorruptedNum, rawBrokenResponse, teacherName || null, subject || null, taskId);
       } else {
         const stmt = sqliteDb.prepare(
           `UPDATE lecture_tasks SET status = ?, progress_pct = ? WHERE id = ?`

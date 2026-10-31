@@ -40,7 +40,7 @@ import {
 } from "./db";
 
 import { sendOTPEmail } from "./email_service";
-import { STANDARD_CRITERIA_LIST, generateSampleCriteria } from "./tasks_store";
+import { STANDARD_CRITERIA_LIST } from "./tasks_store";
 
 async function startServer() {
   // 0. Инициализация реляционной БД (PostgreSQL 16 или встроенный SQLite fallback)
@@ -52,6 +52,41 @@ async function startServer() {
     setInterval(() => {
       createLectureTasksBackup().catch(err => console.error("[Авто-Бэкап] Ошибка создания ежечасной копии:", err));
     }, 60 * 60 * 1000);
+
+    // Гарантируем наличие criteria_active.json и prompt_active.txt на диске для Python-пайплайна
+    const dataDir = path.join(process.cwd(), "data");
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+
+    const criteriaFile = path.join(dataDir, "criteria_active.json");
+    if (!fs.existsSync(criteriaFile)) {
+      const dbCriteria = await getCriteriaConfigFromDB("active");
+      const critPayload = dbCriteria && Array.isArray(dbCriteria.standardCriteria) ? dbCriteria : {
+        standardCriteria: STANDARD_CRITERIA_LIST,
+        criticalCriteria: [
+          { id: 1, title: "Фактическая или методическая ошибка", desc: "Серьезная ошибка в теории или решении, оставшаяся без исправления." },
+          { id: 2, title: "Некорректное общение", desc: "Грубое, унизительное или дискриминирующее общение с учеником." },
+          { id: 3, title: "Некомпетентность в задаче", desc: "Преподаватель не владеет решением рассматриваемой задачи и не может закончить разбор." },
+          { id: 4, title: "Игнорирование учеников", desc: "Систематическое игнорирование вопросов и явных признаков непонимания группы." },
+          { id: 5, title: "Срыв тайминга из-за неподготовленности", desc: "Значительная часть занятия потрачена на организационные или технические действия." },
+          { id: 6, title: "Утечка конфиденциальных данных", desc: "Демонстрация персональных данных, личной переписки или приватной информации." },
+          { id: 7, title: "Заведомо ложный материал", desc: "Выдача заведомо неверного ответа, правила или алгоритма без исправления." },
+          { id: 8, title: "Длительное отсутствие", desc: "Отсутствие преподавателя или учебной работы в течение значительной части занятия." }
+        ],
+        updatedAt: new Date().toISOString(),
+        updatedBy: "system_init"
+      };
+      fs.writeFileSync(criteriaFile, JSON.stringify(critPayload, null, 2), "utf-8");
+      console.log("[Инициализация] criteria_active.json создан на диске для Python-пайплайна.");
+    }
+
+    const promptFile = path.join(dataDir, "prompt_active.txt");
+    if (!fs.existsSync(promptFile)) {
+      const dbPrompt = await getPromptConfigFromDB("active");
+      if (dbPrompt) {
+        fs.writeFileSync(promptFile, dbPrompt, "utf-8");
+        console.log("[Инициализация] prompt_active.txt восстановлен из БД на диск.");
+      }
+    }
   } catch (dbErr) {
     console.error("[Инициализация] Критическая ошибка БД:", dbErr);
   }
@@ -586,79 +621,143 @@ async function startServer() {
       ip
     );
 
-    // Запускаем асинхронную обработку в БД с обновлением прогресса
-    runTaskPipelineInDB(taskId, cleanTeacher, cleanSubject);
+    // Запускаем реальную обработку через Python (KTalk + GigaChat)
+    runTaskPipelineInDB(taskId, lectureUrl.trim(), cleanTeacher, cleanSubject, cleanGroup, currentUser.email);
 
     res.json({
       success: true,
-      message: "Заявка на анализ встречи успешно зарегистрирована. Сервер приступил к обработке.",
+      message: "Заявка на анализ встречи успешно зарегистрирована. Сервер приступил к обработке через нейросеть GigaChat.",
       task: newTask
     });
   });
 
-  // Вспомогательная функция обработки задачи с обновлением прогресса в БД
-  function runTaskPipelineInDB(taskId: string, teacherName: string, subject: string = '') {
-    const steps = [
-      { delay: 3000, status: "downloading" as const, pct: 35 },
-      { delay: 7000, status: "extracting" as const, pct: 65 },
-      { delay: 12000, status: "analyzing" as const, pct: 85 },
-      { delay: 18000, status: "completed" as const, pct: 100 }
+  // Вспомогательная функция обработки задачи через Python конвейер (KTalk + GigaChat)
+  function runTaskPipelineInDB(
+    taskId: string,
+    lectureUrl: string,
+    teacherName: string,
+    subject: string = '',
+    groupName: string = '',
+    curatorEmail: string = '',
+    additionalInfo: string = ''
+  ) {
+    // 1. Устанавливаем статус скачивания
+    updateLectureTaskProgressInDB(taskId, "downloading", 25);
+
+    // 2. Запускаем Python конвейер ktalk_gigachat_pipeline.py
+    const pyScript = path.join(process.cwd(), "ktalk_gigachat_pipeline.py");
+    const args = [
+      pyScript,
+      taskId,
+      lectureUrl,
+      teacherName,
+      subject,
+      groupName,
+      curatorEmail,
+      additionalInfo
     ];
 
-    steps.forEach(step => {
-      setTimeout(async () => {
-        try {
-          if (step.status === "completed") {
-            const seed = Date.now();
-            const criteriaConfig = await getCriteriaConfigFromDB("active");
-            const activeCriteriaList = (criteriaConfig && Array.isArray(criteriaConfig.standardCriteria) && criteriaConfig.standardCriteria.length > 0)
-              ? criteriaConfig.standardCriteria
-              : STANDARD_CRITERIA_LIST;
-            const criteria = generateSampleCriteria(seed, false, subject, teacherName, activeCriteriaList);
-            const failedCriteria = criteria.filter(c => !c.passed);
-            const passedCriteria = criteria.filter(c => c.passed);
+    console.log(`[Python Pipeline] Запуск анализа через Python: ${taskId} (${teacherName})`);
 
-            // Честный расчет балла на основе суммы оценок по всем критериям
-            const maxPoints = criteria.length * 5;
-            const earnedPoints = criteria.reduce((sum, c) => sum + (c.score || 0), 0);
-            const score = maxPoints > 0 ? Math.min(100, Math.max(60, Math.round((earnedPoints / maxPoints) * 100))) : 100;
+    // Промежуточные статусы
+    setTimeout(() => {
+      updateLectureTaskProgressInDB(taskId, "extracting", 50);
+    }, 4000);
 
-            const positiveHighlights = passedCriteria.slice(0, 3).map(c => c.comment || c.text);
-            const recommendations = failedCriteria.length > 0
-              ? failedCriteria.map(c => `По критерию «${c.category}» (№${c.id}): ${c.comment}`)
-              : ["Занятие проведено на высочайшем методическом уровне, критических замечаний нет."];
+    setTimeout(() => {
+      updateLectureTaskProgressInDB(taskId, "analyzing", 75);
+    }, 9000);
 
-            // Сохраняем финальные результаты анализа в БД
-            await updateLectureTaskProgressInDB(
-              taskId,
-              "completed",
-              100,
-              score,
-              positiveHighlights,
-              recommendations,
-              criteria
-            );
+    const child = spawn("python3", args, {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
 
-            // Мгновенный дублирующий бэкап при появлении новой завершенной проверки
-            await createLectureTasksBackup();
+    let stdout = "";
+    let stderr = "";
 
-            // Записываем завершение анализа в audit_logs БД
-            await logAuditEvent(
-              "ai_analyzer",
-              "system",
-              "TASK_ANALYSIS_COMPLETED",
-              taskId,
-              `Успешно завершен анализ занятия преподавателя ${teacherName} (${subject || 'Олимпиадная подготовка'}). Оценка ИИ: ${score}/100. Замечаний: ${failedCriteria.length}`,
-              "127.0.0.1"
-            );
-          } else {
-            // Обновляем промежуточный статус задачи в БД
-            await updateLectureTaskProgressInDB(taskId, step.status, step.pct);
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf-8");
+    });
+
+    child.stderr?.on("data", (chunk) => {
+      const txt = chunk.toString("utf-8");
+      stderr += txt;
+      process.stderr.write(`[Python Worker] ${txt}`);
+    });
+
+    child.on("close", async (code) => {
+      console.log(`[Python Pipeline] Завершился с кодом ${code} для ${taskId}`);
+      try {
+        let parsedResult: any = null;
+        if (stdout.trim()) {
+          const lines = stdout.trim().split("\n");
+          for (let i = lines.length - 1; i >= 0; i--) {
+            const line = lines[i].trim();
+            if (line.startsWith("{") && line.endsWith("}")) {
+              try {
+                parsedResult = JSON.parse(line);
+                break;
+              } catch {}
+            }
           }
-        } catch (stepErr) {
-          console.error(`[Pipeline БД] Ошибка шага ${step.status} для ${taskId}:`, stepErr);
         }
-      }, step.delay);
+
+        if (parsedResult && parsedResult.success && parsedResult.task) {
+          const t = parsedResult.task;
+          const actualTeacher = t.teacherName || teacherName;
+          const actualSubject = t.subject || subject;
+          if (actualTeacher && actualTeacher !== "Преподаватель") {
+            await insertTeacherIfNotExists(actualTeacher, actualSubject);
+          }
+          await updateLectureTaskProgressInDB(
+            taskId,
+            "completed",
+            100,
+            t.totalScore,
+            t.positiveHighlights,
+            t.recommendations,
+            t.criteria,
+            t.criticalViolations,
+            t.talkMetadata,
+            t.isCorrupted,
+            t.rawBrokenResponse,
+            actualTeacher,
+            actualSubject
+          );
+
+          await createLectureTasksBackup();
+          await logAuditEvent(
+            "ai_analyzer",
+            "system",
+            t.isCorrupted ? "TASK_ANALYSIS_CORRUPTED" : "TASK_ANALYSIS_COMPLETED",
+            taskId,
+            `Анализ встречи преподавателя ${actualTeacher} завершен через GigaChat (Python). Оценка: ${t.totalScore}%. Поврежден: ${Boolean(t.isCorrupted)}`,
+            "127.0.0.1"
+          );
+        } else {
+          console.error(`[Python Pipeline] Ошибка выполнения для ${taskId}:`, stderr);
+          const rawErr = stderr || "Неизвестная ошибка выполнения Python-воркера";
+          await updateLectureTaskProgressInDB(
+            taskId,
+            "completed",
+            100,
+            0,
+            [],
+            ["Не удалось получить валидный ответ нейросети. Ознакомьтесь с сырыми данными ошибки."],
+            [],
+            ["Сбой конвейера анализа лекции"],
+            null,
+            true,
+            rawErr
+          );
+          await createLectureTasksBackup();
+        }
+      } catch (err) {
+        console.error(`[Python Pipeline] Исключение при обновлении задачи ${taskId}:`, err);
+        await updateLectureTaskProgressInDB(taskId, "failed", 100);
+      }
     });
   }
 
@@ -1047,6 +1146,14 @@ async function startServer() {
     };
 
     await saveCriteriaConfigInDB("active", criteriaData, user.email);
+
+    try {
+      const dataDir = path.join(process.cwd(), "data");
+      if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, "criteria_active.json"), JSON.stringify(criteriaData, null, 2), "utf-8");
+    } catch (saveErr) {
+      console.warn("Предупреждение сохранения criteria_active.json:", saveErr);
+    }
 
     await logAuditEvent(
       user.email,
