@@ -23,12 +23,19 @@ import {
 
 interface AuditLog {
   id: number;
-  timestamp: number;
-  username: string;
-  telegram_id: number | null;
+  timestamp: string;
+  actorEmail: string;
+  actorRole?: string;
   action: string;
-  ip_address: string | null;
-  details: string | null;
+  target?: string;
+  ipAddress?: string | null;
+  details?: string | null;
+}
+
+export interface ReportDisplaySettings {
+  displayMode: 'five_point' | 'penalty' | 'status_only';
+  naBadgeText: string;
+  naDescription: string;
 }
 
 interface PromptData {
@@ -36,29 +43,37 @@ interface PromptData {
   base: string;
   factory: string;
   audit_logs: AuditLog[];
+  reportSettings?: ReportDisplaySettings;
 }
 
 interface PromptEditorProps {
   token?: string;
   userEmail?: string;
   isSeniorCurator?: boolean;
+  onConfigUpdated?: () => void;
 }
 
 export const PromptEditor: React.FC<PromptEditorProps> = ({
   token: propToken,
   userEmail: propEmail,
-  isSeniorCurator = false
+  isSeniorCurator = false,
+  onConfigUpdated
 }) => {
   const sessionToken = propToken || sessionStorage.getItem('prompt_session_token') || '';
   const sessionUser = propEmail || sessionStorage.getItem('prompt_session_user') || '';
 
-  // Состояние данных промптов
+  // Состояние данных промптов и формата отчетов
   const [promptData, setPromptData] = useState<PromptData | null>(null);
   const [activePromptText, setActivePromptText] = useState<string>('');
   const [basePromptText, setBasePromptText] = useState<string>('');
+  const [reportSettings, setReportSettings] = useState<ReportDisplaySettings>({
+    displayMode: 'five_point',
+    naBadgeText: 'Н/П',
+    naDescription: 'Критерий не применим к формату данного занятия — исключён из максимального и набранного балла.'
+  });
   const [isLoadingData, setIsLoadingData] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string>('');
-  const [activeSubTab, setActiveSubTab] = useState<'editor' | 'base' | 'factory' | 'audit'>('editor');
+  const [activeSubTab, setActiveSubTab] = useState<'editor' | 'report_format' | 'base' | 'factory' | 'audit'>('editor');
 
   // Состояние модального окна подтверждения сохранения/сброса (2FA через Email)
   const [modalAction, setModalAction] = useState<string | null>(null);
@@ -100,6 +115,9 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
       setPromptData(data);
       setActivePromptText(data.active || '');
       setBasePromptText(data.base || '');
+      if (data.reportSettings) {
+        setReportSettings(data.reportSettings);
+      }
     } catch (err: any) {
       setLoadError(err.message || 'Сбой подключения к серверу.');
     } finally {
@@ -156,7 +174,12 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
     setModalError('');
 
     try {
-      const promptToSave = modalAction === 'save_active' ? activePromptText : (modalAction === 'save_base' ? basePromptText : undefined);
+      const promptToSave =
+        modalAction === 'save_active'
+          ? activePromptText
+          : modalAction === 'save_base'
+          ? basePromptText
+          : undefined;
 
       const res = await fetch('/api/prompt/confirm-save', {
         method: 'POST',
@@ -167,7 +190,11 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
         body: JSON.stringify({
           code: modalCode.trim(),
           action: modalAction,
-          prompt_text: promptToSave
+          prompt_text: promptToSave,
+          reportSettings:
+            modalAction === 'save_report_settings' || modalAction === 'save_active'
+              ? reportSettings
+              : undefined
         })
       });
 
@@ -177,10 +204,11 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
         return;
       }
 
-      showToast(data.message || 'Системный промпт нейросети успешно обновлен!');
+      showToast(data.message || 'Изменения успешно зафиксированы в БД!');
       setModalAction(null);
       setModalCode('');
       await loadPromptData();
+      if (onConfigUpdated) onConfigUpdated();
     } catch (err: any) {
       setModalError(err.message || 'Сбой подключения к серверу.');
     } finally {
@@ -258,21 +286,32 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
       {/* Вкладки редактора */}
       <div className="bg-[#1B153B] border border-indigo-800/50 rounded-3xl p-6 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-indigo-900/50 pb-4">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => setActiveSubTab('editor')}
-              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
                 activeSubTab === 'editor'
                   ? 'bg-[#FF5252] text-white shadow-lg shadow-[#FF5252]/20'
                   : 'bg-[#14102C] text-indigo-300 hover:text-white'
               }`}
             >
               <FileCode className="w-3.5 h-3.5" />
-              Рабочий промпт (Активный)
+              Рабочий промпт
+            </button>
+            <button
+              onClick={() => setActiveSubTab('report_format')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                activeSubTab === 'report_format'
+                  ? 'bg-[#38BDF8] text-[#14102C] shadow-lg shadow-[#38BDF8]/20'
+                  : 'bg-[#14102C] text-indigo-300 hover:text-white'
+              }`}
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              Формат отчёта и Н/П
             </button>
             <button
               onClick={() => setActiveSubTab('base')}
-              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
                 activeSubTab === 'base'
                   ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20'
                   : 'bg-[#14102C] text-indigo-300 hover:text-white'
@@ -283,7 +322,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
             </button>
             <button
               onClick={() => setActiveSubTab('factory')}
-              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
                 activeSubTab === 'factory'
                   ? 'bg-slate-700 text-white'
                   : 'bg-[#14102C] text-indigo-300 hover:text-white'
@@ -292,25 +331,61 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               <RotateCcw className="w-3.5 h-3.5" />
               Заводской промпт
             </button>
+            <button
+              onClick={() => setActiveSubTab('audit')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                activeSubTab === 'audit'
+                  ? 'bg-amber-500 text-[#14102C]'
+                  : 'bg-[#14102C] text-indigo-300 hover:text-white'
+              }`}
+            >
+              <History className="w-3.5 h-3.5" />
+              История изменений
+            </button>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {activeSubTab === 'editor' && (
+              <>
+                <button
+                  onClick={() => handleOpenActionModal('reset_to_base')}
+                  className="px-3 py-2 bg-[#14102C] hover:bg-indigo-950 border border-indigo-700/60 text-indigo-200 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Сбросить к базовому</span>
+                </button>
+                <button
+                  onClick={() => handleOpenActionModal('reset_to_factory')}
+                  className="px-3 py-2 bg-[#14102C] hover:bg-rose-950/50 border border-rose-500/30 text-rose-200 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Заводской сброс</span>
+                </button>
+                <button
+                  onClick={() => handleOpenActionModal('save_active')}
+                  className="px-4 py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 shadow-lg shadow-[#FF5252]/30 cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>Сохранить рабочий промпт (2FA)</span>
+                </button>
+              </>
+            )}
+            {activeSubTab === 'report_format' && (
               <button
-                onClick={() => handleOpenActionModal('save_active')}
-                className="px-4 py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 shadow-lg shadow-[#FF5252]/30"
+                onClick={() => handleOpenActionModal('save_report_settings')}
+                className="px-4 py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 shadow-lg shadow-[#FF5252]/30 cursor-pointer"
               >
                 <Save className="w-3.5 h-3.5" />
-                <span>Сохранить рабочий промпт (2FA)</span>
+                <span>Сохранить формат отчёта (2FA)</span>
               </button>
             )}
             {activeSubTab === 'base' && (
               <button
                 onClick={() => handleOpenActionModal('save_base')}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2"
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer"
               >
                 <Save className="w-3.5 h-3.5" />
-                <span>Зафиксировать новый эталон</span>
+                <span>Зафиксировать новый эталон (2FA)</span>
               </button>
             )}
           </div>
@@ -323,7 +398,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               <span>Системная инструкция, отправляемая в Сбер GigaChat-2-Pro перед анализом:</span>
               <button
                 onClick={() => handleCopy(activePromptText, 'active')}
-                className="hover:text-white flex items-center gap-1 font-mono"
+                className="hover:text-white flex items-center gap-1 font-mono cursor-pointer"
               >
                 {copiedKey === 'active' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>Скопировать весь текст</span>
@@ -339,6 +414,84 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
           </div>
         )}
 
+        {/* Формат отчётов и неприменимых критериев (Н/П) */}
+        {activeSubTab === 'report_format' && (
+          <div className="space-y-5">
+            <div className="p-4 bg-[#14102C] border border-[#38BDF8]/30 rounded-2xl text-xs text-indigo-200 leading-relaxed">
+              Настройте способ отображения баллов по каждому критерию в карточке проверки и обозначение неприменимых критериев (<code className="text-[#38BDF8] font-mono">null</code>). Критерии со статусом <strong className="text-white">{reportSettings.naBadgeText || 'Н/П'}</strong> автоматически исключаются из набранного и максимального балла при расчёте итога.
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-xs font-bold text-white">
+                Формат отображения оценки критерия в карточке:
+              </label>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {[
+                  {
+                    id: 'five_point' as const,
+                    title: '5-балльная шкала (X / 5)',
+                    desc: 'Стандартный формат: 5 / 5 без нарушений, 3 / 5 частичное, 1 / 5 грубое.'
+                  },
+                  {
+                    id: 'penalty' as const,
+                    title: 'Штрафная шкала (-0 / -1 / -2)',
+                    desc: 'Показывает снятые штрафные баллы напрямую из оценки модели.'
+                  },
+                  {
+                    id: 'status_only' as const,
+                    title: 'Текстовый статус',
+                    desc: 'Выполнено / Частично / Нарушение без числовой дроби.'
+                  }
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setReportSettings(prev => ({ ...prev, displayMode: opt.id }))}
+                    className={`text-left p-4 rounded-2xl border transition-all cursor-pointer ${
+                      reportSettings.displayMode === opt.id
+                        ? 'bg-[#241E4F] border-[#38BDF8] text-white'
+                        : 'bg-[#14102C] border-indigo-900/60 text-indigo-200 hover:border-indigo-600'
+                    }`}
+                  >
+                    <div className="text-xs font-bold">{opt.title}</div>
+                    <div className="text-[11px] text-indigo-300/80 mt-1 leading-relaxed">{opt.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-white mb-1.5">
+                  Метка неприменимого критерия:
+                </label>
+                <input
+                  type="text"
+                  maxLength={24}
+                  value={reportSettings.naBadgeText}
+                  onChange={(e) => setReportSettings(prev => ({ ...prev, naBadgeText: e.target.value }))}
+                  placeholder="Н/П"
+                  className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-3.5 py-2.5 text-xs font-mono text-white focus:outline-none focus:border-[#38BDF8]"
+                />
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="block text-xs font-bold text-white mb-1.5">
+                  Пояснение для неприменимых критериев в карточке:
+                </label>
+                <input
+                  type="text"
+                  maxLength={250}
+                  value={reportSettings.naDescription}
+                  onChange={(e) => setReportSettings(prev => ({ ...prev, naDescription: e.target.value }))}
+                  placeholder="Критерий не применим к формату данного занятия — исключён из суммы баллов."
+                  className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-[#38BDF8]"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Базовый эталон */}
         {activeSubTab === 'base' && (
           <div className="space-y-3">
@@ -346,7 +499,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               <span>Зафиксированный методический эталон для быстрого восстановления:</span>
               <button
                 onClick={() => handleCopy(basePromptText, 'base')}
-                className="hover:text-white flex items-center gap-1 font-mono"
+                className="hover:text-white flex items-center gap-1 font-mono cursor-pointer"
               >
                 {copiedKey === 'base' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>Скопировать</span>
@@ -368,7 +521,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               <span>Вшитый в исходный код заводской промпт разработчика:</span>
               <button
                 onClick={() => handleCopy(promptData?.factory || '', 'factory')}
-                className="hover:text-white flex items-center gap-1 font-mono"
+                className="hover:text-white flex items-center gap-1 font-mono cursor-pointer"
               >
                 {copiedKey === 'factory' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>Скопировать</span>
@@ -380,6 +533,46 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               rows={22}
               className="w-full bg-[#120E27]/50 border border-indigo-900/40 rounded-2xl p-4 text-xs font-mono text-slate-400 focus:outline-none resize-y leading-relaxed"
             />
+          </div>
+        )}
+
+        {/* История изменений промптов */}
+        {activeSubTab === 'audit' && (
+          <div className="space-y-3">
+            <div className="text-xs text-indigo-300">
+              Последние зафиксированные действия с промптом и критериями в базе данных:
+            </div>
+            <div className="overflow-x-auto border border-indigo-900/50 rounded-2xl">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-[#14102C] text-indigo-300 uppercase text-[10px]">
+                  <tr>
+                    <th className="px-4 py-2.5">Время</th>
+                    <th className="px-4 py-2.5">Инициатор</th>
+                    <th className="px-4 py-2.5">Действие</th>
+                    <th className="px-4 py-2.5">Детали</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-indigo-900/40">
+                  {(promptData?.audit_logs || []).map((log) => (
+                    <tr key={log.id} className="hover:bg-[#14102C]/60">
+                      <td className="px-4 py-2.5 font-mono text-[11px] text-indigo-300 whitespace-nowrap">
+                        {log.timestamp ? log.timestamp.replace('T', ' ').slice(0, 19) : '—'}
+                      </td>
+                      <td className="px-4 py-2.5 text-white font-medium">{log.actorEmail}</td>
+                      <td className="px-4 py-2.5 font-mono text-[11px] text-[#38BDF8]">{log.action}</td>
+                      <td className="px-4 py-2.5 text-indigo-200">{log.details || '—'}</td>
+                    </tr>
+                  ))}
+                  {(!promptData?.audit_logs || promptData.audit_logs.length === 0) && (
+                    <tr>
+                      <td colSpan={4} className="px-4 py-8 text-center text-indigo-400">
+                        Записи аудита пока отсутствуют.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </div>

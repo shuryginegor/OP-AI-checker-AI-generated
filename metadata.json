@@ -1,6 +1,6 @@
 {
   "name": "Lecture AI Analyzer Bot",
-  "description": "Telegram bot and AI service for analyzing KTalk video lectures using GigaChat API",
+  "description": "Система честного методического аудита вебинаров КТалк через Сбер GigaChat API: только реальные мультимодальные проверки, полная прозрачность статусов и критериев без заглушек.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

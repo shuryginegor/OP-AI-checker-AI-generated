@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_dynamic_criteria():
-    """Загружает актуальный список динамических критериев из data/criteria_active.json."""
+    """Загружает актуальный список динамических критериев из data/criteria_active.json со строгой сквозной нумерацией."""
     criteria_file = os.path.join(os.getcwd(), "data", "criteria_active.json")
     if os.path.exists(criteria_file):
         try:
@@ -56,9 +56,22 @@ def get_dynamic_criteria():
                 std = data.get("standardCriteria")
                 crit = data.get("criticalCriteria")
                 if std and isinstance(std, list) and len(std) > 0:
-                    std_lines = [f"{c.get('id', i+1)}. {c.get('text', c.get('title', ''))}" for i, c in enumerate(std)]
-                    crit_lines = [f"{c.get('id', i+1)}. {c.get('title', '')}: {c.get('desc', '')}" for i, c in enumerate(crit)] if crit else CRITICAL_CRITERIA
-                    return std_lines, crit_lines
+                    std_lines = [
+                        f"{i + 1}. {str(c.get('text') or c.get('title') or '').strip()}"
+                        for i, c in enumerate(std)
+                        if isinstance(c, dict)
+                    ]
+                    crit_lines = (
+                        [
+                            f"{i + 1}. {str(c.get('title') or '').strip()}: {str(c.get('desc') or '').strip()}"
+                            for i, c in enumerate(crit)
+                            if isinstance(c, dict)
+                        ]
+                        if crit and isinstance(crit, list) and len(crit) > 0
+                        else CRITICAL_CRITERIA
+                    )
+                    if std_lines:
+                        return std_lines, crit_lines
         except Exception as e:
             logger.warning(f"Не удалось прочитать criteria_active.json: {e}")
     return STANDARD_CRITERIA, CRITICAL_CRITERIA

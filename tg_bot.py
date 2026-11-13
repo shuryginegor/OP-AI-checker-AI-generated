@@ -145,11 +145,11 @@ def get_recheck_inline_keyboard():
 
 
 async def get_teachers_inline_keyboard():
-    teachers = await database.get_teachers()
+    teachers = await database.get_teachers_with_ids()
     buttons = []
-    for idx, teacher_name in enumerate(teachers):
+    for t in teachers:
         buttons.append([
-            InlineKeyboardButton(text=f"👤 {teacher_name}", callback_data=f"teacher_sel:{idx}")
+            InlineKeyboardButton(text=f"👤 {t['name']}", callback_data=f"teacher_sel:{t['id']}")
         ])
     buttons.append([
         InlineKeyboardButton(text="➕ Добавить нового", callback_data="teacher_add_new")
@@ -158,11 +158,11 @@ async def get_teachers_inline_keyboard():
 
 
 async def get_stats_teachers_inline_keyboard():
-    teachers = await database.get_teachers()
+    teachers = await database.get_teachers_with_ids()
     buttons = []
-    for idx, teacher_name in enumerate(teachers):
+    for t in teachers:
         buttons.append([
-            InlineKeyboardButton(text=f"👤 {teacher_name}", callback_data=f"stats_teacher:{idx}")
+            InlineKeyboardButton(text=f"👤 {t['name']}", callback_data=f"stats_teacher:{t['id']}")
         ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -204,12 +204,17 @@ async def get_del_users_inline_keyboard():
     allowed = await database.get_allowed_users()
     authorized = await database.get_authorized_users()
     admins = await database.get_admins()
+    admin_usernames = {
+        str(a.get("value", "")).lower()
+        for a in admins
+        if isinstance(a, dict) and a.get("type") == "username"
+    }
 
     inline_keyboard = []
 
     if allowed:
         for u in allowed:
-            is_adm = u.lower() in admins
+            is_adm = u.lower() in admin_usernames
             prefix = "👑 (Админ)" if is_adm else "📝"
             inline_keyboard.append([
                 InlineKeyboardButton(
@@ -671,7 +676,9 @@ async def process_meet_link(message: Message, state: FSMContext):
 
         score_percent = existing.get("score_percent")
         if score_percent is None:
-            score_percent = (max(0, 42 - point) / 42.0) * 100.0
+            import criteria as crit_mod
+            dyn_max = max(2, len(crit_mod.get_dynamic_criteria()[0]) * 2)
+            score_percent = (max(0, dyn_max - point) / float(dyn_max)) * 100.0
         score_percent = round(float(score_percent), 2)
 
         teacher_text = f"👤 <b>Преподаватель:</b> {html.escape(ex_teacher)}\n" if ex_teacher else ""
@@ -776,13 +783,13 @@ async def process_select_teacher(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
 
-    idx_str = callback.data.split(":")[1]
-    teachers = await database.get_teachers()
+    id_str = callback.data.split(":", 1)[1]
     selected_teacher = "Не указан"
     try:
-        idx = int(idx_str)
-        if 0 <= idx < len(teachers):
-            selected_teacher = teachers[idx]
+        t_id = int(id_str)
+        found = await database.get_teacher_by_id(t_id)
+        if found:
+            selected_teacher = found
     except ValueError:
         pass
 
@@ -886,7 +893,9 @@ async def process_confirm_info_data(callback: CallbackQuery, state: FSMContext):
 
             score_percent = existing.get("score_percent")
             if score_percent is None:
-                score_percent = (max(0, 42 - point) / 42.0) * 100.0
+                import criteria as crit_mod
+                dyn_max = max(2, len(crit_mod.get_dynamic_criteria()[0]) * 2)
+                score_percent = (max(0, dyn_max - point) / float(dyn_max)) * 100.0
             score_percent = round(float(score_percent), 2)
 
             teacher_text = f"👤 <b>Преподаватель:</b> {html.escape(ex_teacher)}\n" if ex_teacher else ""
@@ -936,12 +945,13 @@ async def process_confirm_info_data(callback: CallbackQuery, state: FSMContext):
 
         status_msg = await callback.message.answer("⏳ Скачиваем видеозапись и текстовые материалы с КТалк...")
 
-        artifacts = await fetch_talk.download_all_artifacts_by_url(link, fetch_talk.get_api_key())
+        artifacts = await fetch_talk.download_all_artifacts_by_url(link, fetch_talk.get_api_key(), task_prefix=f"tg_{response_id}")
         if not artifacts or not artifacts.get("video"):
+            err_msg = artifacts.get("video_error") if isinstance(artifacts, dict) and artifacts.get("video_error") else "Не удалось скачать видеозапись с сервера."
             await status_msg.edit_text(
-                "❌ Не удалось скачать видеозапись с сервера. Попробуйте еще раз позже.",
+                f"❌ {err_msg} Проверка не выполнена.",
             )
-            await database.write_result(response_id, 0, True, "Ошибка скачивания видеозаписи с КТалк.")
+            await database.write_result(response_id, -2, True, f"Ошибка скачивания видеозаписи с КТалк: {err_msg}")
             await callback.message.answer("Возврат в главное меню.", reply_markup=await get_user_main_keyboard(callback.from_user.id))
             return
 
@@ -971,7 +981,7 @@ async def process_confirm_info_data(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         logging.error(f"Ошибка при запуске анализа встречи: {e}", exc_info=True)
         if response_id is not None:
-            await database.write_result(response_id, 0, True, f"Ошибка при инициализации задачи: {e}")
+            await database.write_result(response_id, -2, True, f"Ошибка при инициализации задачи: {e}")
         await callback.message.answer("❌ Произошла ошибка при отправке видео на проверку ИИ.", reply_markup=await get_user_main_keyboard(callback.from_user.id))
     finally:
         await state.clear()
@@ -1004,13 +1014,11 @@ async def process_teacher_stats_cmd(message: Message, state: FSMContext = None):
 @dp.callback_query(F.data.startswith("stats_teacher:"))
 async def process_select_stats_teacher(callback: CallbackQuery):
     await callback.answer()
-    idx_str = callback.data.split(":")[1]
-    teachers = await database.get_teachers()
+    id_str = callback.data.split(":", 1)[1]
     try:
-        idx = int(idx_str)
-        if 0 <= idx < len(teachers):
-            teacher_name = teachers[idx]
-        else:
+        t_id = int(id_str)
+        teacher_name = await database.get_teacher_by_id(t_id)
+        if not teacher_name:
             await callback.message.answer("Преподаватель не найден.")
             return
     except ValueError:
@@ -1065,26 +1073,23 @@ async def process_select_stats_teacher(callback: CallbackQuery):
         )
 
     for i, resp in enumerate(responses, 1):
-        link = resp.get("link", "Не указана")
-        add_info = resp.get("additional_info", "—")
-        point = resp.get("point", "—")
+        link = html.escape(str(resp.get("link") or "Не указана"))
+        add_info = html.escape(str(resp.get("additional_info") or "—"))
+        point = resp.get("point")
+        point_display = "Ошибка" if point == -2 else ("В работе" if point == -1 else (str(point) if point is not None else "—"))
         is_crit = resp.get("critical", False)
-        comment = resp.get("comment", "—")
+        comment_formatted = ai_common.format_markdown_to_html(str(resp.get("comment") or "—"))
 
         text = (
             f"<b>Встреча #{i}</b>\n"
             f"🔗 <b>Ссылка:</b> {link}\n"
             f"💬 <b>Доп. инфо:</b> {add_info}\n"
-            f"⭐️ <b>Балл:</b> <code>{point}</code>\n"
+            f"⭐️ <b>Штраф:</b> <code>{point_display}</code>\n"
             f"⚠️ <b>Крит. нарушения:</b> {'🚨 ДА' if is_crit else '✅ Нет'}\n\n"
-            f"📝 <b>Результат проверки:</b>\n{comment}"
+            f"📝 <b>Результат проверки:</b>\n{comment_formatted}"
         )
 
-        if len(text) > 4000:
-            for chunk_start in range(0, len(text), 4000):
-                await callback.message.answer(text[chunk_start:chunk_start+4000], parse_mode="HTML")
-        else:
-            await callback.message.answer(text, parse_mode="HTML")
+        await ai_common.send_long_message(bot, callback.message.chat.id, text, parse_mode="HTML")
 
 
 @dp.message(default_state)

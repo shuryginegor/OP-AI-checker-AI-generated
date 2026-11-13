@@ -72,7 +72,7 @@ def extract_record_id(url: str) -> str:
     """Извлекает уникальный ID записи (recordingKey) из ссылки KTalk."""
     if not url:
         return ""
-    match = re.search(r"/(?:recordings|records)/([a-zA-Z0-9\-]+)", url)
+    match = re.search(r"/(?:recordings|records)/([a-zA-Z0-9\-_]+)", url)
     if match:
         return match.group(1)
     return url.strip()
@@ -503,11 +503,16 @@ async def init_db():
                         job_name TEXT UNIQUE REFERENCES responses(job_name) ON DELETE CASCADE,
                         point INTEGER DEFAULT -1,
                         critical BOOLEAN,
-                        comment TEXT
+                        comment TEXT,
+                        score_percent REAL
                     )
                 ''')
                 try:
                     await conn.execute("ALTER TABLE ai_checks ADD COLUMN response_id BIGINT REFERENCES responses(ID)")
+                except Exception:
+                    pass
+                try:
+                    await conn.execute("ALTER TABLE ai_checks ADD COLUMN score_percent REAL")
                 except Exception:
                     pass
                 await conn.execute('''
@@ -996,6 +1001,41 @@ async def get_teachers() -> list:
     async def _query(conn):
         rows = await conn.fetch("SELECT name FROM teachers ORDER BY name")
         return [row["name"] for row in rows]
+
+    return await _execute_pg_query(_query)
+
+
+def _sqlite_get_teachers_with_ids() -> list[dict]:
+    with _get_sqlite_conn() as conn:
+        rows = conn.execute("SELECT id, name FROM teachers ORDER BY name ASC").fetchall()
+        return [{"id": int(r["id"]), "name": r["name"]} for r in rows]
+
+
+async def get_teachers_with_ids() -> list[dict]:
+    """Возвращает список преподавателей со стабильными ID [{'id': ..., 'name': ...}]."""
+    if DB_TYPE == "sqlite":
+        return await asyncio.to_thread(_sqlite_get_teachers_with_ids)
+
+    async def _query(conn):
+        rows = await conn.fetch("SELECT ID AS id, name FROM teachers ORDER BY name ASC")
+        return [{"id": int(r["id"]), "name": r["name"]} for r in rows]
+
+    return await _execute_pg_query(_query)
+
+
+def _sqlite_get_teacher_by_id(teacher_id: int) -> Optional[str]:
+    with _get_sqlite_conn() as conn:
+        row = conn.execute("SELECT name FROM teachers WHERE id = ?", (teacher_id,)).fetchone()
+        return row["name"] if row else None
+
+
+async def get_teacher_by_id(teacher_id: int) -> Optional[str]:
+    """Возвращает имя преподавателя по стабильному ID."""
+    if DB_TYPE == "sqlite":
+        return await asyncio.to_thread(_sqlite_get_teacher_by_id, teacher_id)
+
+    async def _query(conn):
+        return await conn.fetchval("SELECT name FROM teachers WHERE ID = $1", teacher_id)
 
     return await _execute_pg_query(_query)
 
@@ -1754,12 +1794,6 @@ def _sqlite_get_telegram_id_by_username(username: str) -> Optional[int]:
         row = conn.execute("SELECT telegram_id FROM authorized_users WHERE LOWER(username) = ?", (clean,)).fetchone()
         if row and row["telegram_id"]:
             return int(row["telegram_id"])
-        row2 = conn.execute(
-            "SELECT telegram_id FROM responses WHERE LOWER(username) = ? AND telegram_id IS NOT NULL ORDER BY id DESC LIMIT 1",
-            (clean,)
-        ).fetchone()
-        if row2 and row2["telegram_id"]:
-            return int(row2["telegram_id"])
     return None
 
 
@@ -1771,12 +1805,6 @@ async def get_telegram_id_by_username(username: str) -> Optional[int]:
         row = await conn.fetchrow("SELECT telegram_id FROM authorized_users WHERE LOWER(username) = $1", clean)
         if row and row["telegram_id"]:
             return int(row["telegram_id"])
-        row2 = await conn.fetchrow(
-            "SELECT telegram_id FROM responses WHERE LOWER(username) = $1 AND telegram_id IS NOT NULL ORDER BY ID DESC LIMIT 1",
-            clean
-        )
-        if row2 and row2["telegram_id"]:
-            return int(row2["telegram_id"])
         return None
     return await _execute_pg_query(_query)
 

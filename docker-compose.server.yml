@@ -51,8 +51,9 @@ services:
       # Telegram Bot Token (для отправки 2FA-кодов и уведомлений кураторам о готовности отчетов)
       - BOT_TOKEN=${BOT_TOKEN}
       
-      # Ключ доступа к КТалк API для скачивания записей
+      # Ключ доступа и домен пространства КТалк API для скачивания и синхронизации записей
       - TALK_API_KEY=${TALK_API_KEY}
+      - TALK_DOMAIN=${TALK_DOMAIN}
       
       # Авторизация в Сбер GigaChat (выполняется строго из РФ!)
       - GIGACHAT_CREDENTIALS=${GIGACHAT_CREDENTIALS}
@@ -76,6 +77,13 @@ services:
       - ADMIN_USERNAMES=${ADMIN_USERNAMES:-shurygin_egor,aemss72}
       - PROMPT_ADMIN_USERNAMES=${PROMPT_ADMIN_USERNAMES:-shurygin_egor,aemss72}
       
+      # Почтовый SMTP-сервер (для отправки 2FA кодов кураторам)
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM}
+
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - TESTING_MODE=${TESTING_MODE:-false}
     volumes:

@@ -3,21 +3,22 @@
 ktalk_gigachat_pipeline.py
 
 Модуль взаимодействия с внешними сервисами КТалк (API) и Сбер GigaChat исключительно на Python.
-Использует в первую очередь:
-- fetch_talk.py: проверка доступности встречи, извлечение метаданных (название, спикер, дата), получение транскрипта и саммари.
-- ai_gigachat.py: официальный клиент GigaChat с бандлом сертификатов Минцифры РФ и таймаутом 600 сек.
-- ai_common.py: робастный парсинг и восстановление JSON (json.loads / json_repair / regex), расчет баллов и процентов.
-
-Требования:
-1. К каждому критерию при нарушении фиксировать точные таймкоды.
-2. Подгружать динамический промпт и динамические критерии из data/.
-3. Извлекать реального преподавателя из метаданных КТалк (никаких фиктивных/липовых данных).
-4. При невозможности восстановить JSON помечать разбор как поврежденный (is_corrupted) и сохранять сырой ответ.
-5. Кольцевой бэкап в data/lecture_tasks_backup.json — строго не более 100 лекций (FIFO).
+Принцип Кристальной честности:
+1. Никогда не оцениваем лекцию вслепую по одному транскрипту: если видеозапись КТалк
+   не удалось скачать или медиа не удалось передать в GigaChat, задача честно завершается
+   со статусом `failed`, `totalScore: None` и точной причиной ошибки.
+2. В нейросеть обязательно передаются аудиодорожка и ключевые кадры видеозаписи + транскрипт/саммари.
+3. Все локальные временные медиафайлы (видео, аудио, кадры, транскрипт, саммари) и файлы в облаке
+   GigaChat гарантированно удаляются после завершения проверки (152-ФЗ).
+4. Динамические критерии перенумеровываются без дырок (`1..N`). Критерий со значением `null`
+   отмечается как «Н/П» (`notApplicable: True`) и не включается ни в числитель, ни в знаменатель.
+5. Критические нарушения НЕ обнуляют и не урезают реальный балл — они фиксируются отдельно.
+6. Никогда не затираем серверный кольцевой бэкап `data/lecture_tasks_backup.json` из Python-пайплайна.
 """
 
 import os
 import sys
+import glob
 import json
 import re
 import time
@@ -29,27 +30,51 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import fetch_talk
+import file_processing
 import ai_gigachat
 import ai_common
 from gigachat.models import Chat, Messages, MessagesRole
 
 DATA_DIR = os.path.join(os.getcwd(), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
-BACKUP_FILE = os.path.join(DATA_DIR, "lecture_tasks_backup.json")
-MAX_BACKUP_TASKS = 100
+
+
+def emit_stage(stage: str):
+    """Передает реальный этап выполнения родительскому процессу server.ts."""
+    print(f"[STAGE] {stage}", file=sys.stderr, flush=True)
 
 
 def load_dynamic_criteria() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Загружает критерии из data/criteria_active.json или использует эталонный список."""
+    """Загружает критерии из data/criteria_active.json и нормализует их нумерацию 1..N без дырок."""
     crit_file = os.path.join(DATA_DIR, "criteria_active.json")
     if os.path.exists(crit_file):
         try:
             with open(crit_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                std = data.get("standardCriteria", [])
-                crit = data.get("criticalCriteria", [])
-                if std and isinstance(std, list):
-                    return std, crit
+                raw_std = data.get("standardCriteria", [])
+                raw_crit = data.get("criticalCriteria", [])
+                if raw_std and isinstance(raw_std, list):
+                    std = []
+                    for i, c in enumerate(raw_std):
+                        if not isinstance(c, dict):
+                            continue
+                        std.append({
+                            "id": i + 1,
+                            "text": str(c.get("text") or c.get("title") or "").strip(),
+                            "category": str(c.get("category") or "Методический стандарт").strip()
+                        })
+                    crit = []
+                    if raw_crit and isinstance(raw_crit, list):
+                        for i, c in enumerate(raw_crit):
+                            if not isinstance(c, dict):
+                                continue
+                            crit.append({
+                                "id": i + 1,
+                                "title": str(c.get("title") or "").strip(),
+                                "desc": str(c.get("desc") or "").strip()
+                            })
+                    if std:
+                        return std, crit
         except Exception as e:
             print(f"[Criteria] Ошибка чтения {crit_file}: {e}", file=sys.stderr)
 
@@ -122,7 +147,7 @@ def load_dynamic_prompt() -> str:
 • null — КРИТЕРИЙ НЕ ПРИМЕНИМ из-за формата/специфики урока или информации от пользователя.
 
 ОБЯЗАТЕЛЬНЫЕ ПОЛЯ К КАЖДОМУ КРИТЕРИЮ:
-- `timecodes`: массив строк с точными таймкодами нарушений (например `["00:14:20", "00:42:15"]`). Если нарушений нет (score 0), передавай пустой массив `[]`.
+- `timecodes`: массив строк с точными таймкодами нарушений или наблюдений (например `["00:14:20", "00:42:15"]`). Если нарушений нет (score 0), можно указать ключевые таймкоды подтверждения или пустой массив `[]`.
 - `quote`: прямая цитата из урока, подтверждающая нарушение или выполнение.
 - `details`: развёрнутое обоснование оценки (почему сняты баллы или почему критерий не применим).
 
@@ -139,20 +164,24 @@ def load_dynamic_prompt() -> str:
 
 
 def build_system_prompt(additional_info: str = "") -> Tuple[str, List[Dict[str, Any]]]:
-    """Формирует итоговый системный промпт с динамическими критериями и JSON схемой."""
+    """Формирует итоговый системный промпт с динамическими критериями и гарантированной JSON-схемой."""
     std_criteria, crit_criteria = load_dynamic_criteria()
     template = load_dynamic_prompt()
 
-    std_formatted_lines = [f"{c.get('id', i+1)}. {c.get('text', c.get('title', ''))}" for i, c in enumerate(std_criteria)]
+    std_formatted_lines = [f"{c['id']}. {c['text']}" for c in std_criteria]
     std_formatted = "\n".join(std_formatted_lines)
 
-    crit_formatted_lines = [f"{c.get('id', i+1)}. {c.get('title', '')}: {c.get('desc', '')}" for i, c in enumerate(crit_criteria)]
+    crit_formatted_lines = [f"{c['id']}. {c['title']}: {c['desc']}" for c in crit_criteria]
     crit_formatted = "\n".join(crit_formatted_lines)
 
     info_str = additional_info.strip() if additional_info and additional_info.strip() else "Отсутствует"
 
     prompt = template
-    prompt = prompt.replace("{additional_info}", info_str).replace("{{additional_info}}", info_str)
+    if "{additional_info}" in prompt or "{{additional_info}}" in prompt:
+        prompt = prompt.replace("{additional_info}", info_str).replace("{{additional_info}}", info_str)
+    elif info_str != "Отсутствует":
+        prompt += f'\n\nДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ ОТ ПОЛЬЗОВАТЕЛЯ:\n"{info_str}"\n'
+
     prompt = prompt.replace("{standard_formatted}", std_formatted)
     prompt = prompt.replace("{critical_formatted}", crit_formatted)
 
@@ -163,7 +192,7 @@ def build_system_prompt(additional_info: str = "") -> Tuple[str, List[Dict[str, 
 Твой ответ должен состоять ИСКЛЮЧИТЕЛЬНО из одного валидного JSON-объекта со следующими ключами:
 {{
   "is_critical": false,
-  "critical_details": ["<таймкод — подробное описание критического нарушения при наличии>"],
+  "critical_details": ["<ЧЧ:ММ:СС — подробное описание критического нарушения при наличии>"],
   "criteria_scores": [
     {{
       "id": 1,
@@ -175,50 +204,79 @@ def build_system_prompt(additional_info: str = "") -> Tuple[str, List[Dict[str, 
     }}
   ],
   "point": 0,
-  "comment": "Развернутый экспертный разбор (10-15 предложений) с точными таймкодами...",
-  "recommendations": "5 конкретных методических рекомендаций преподавателю..."
+  "comment": "Развернутый экспертный разбор (10-15 предложений) с точными таймкодами вида ЧЧ:ММ:СС...",
+  "recommendations": [
+    "Конкретная рекомендация 1 (с указанием таймкодов проблемных мест)",
+    "Конкретная рекомендация 2",
+    "Конкретная рекомендация 3",
+    "Конкретная рекомендация 4",
+    "Конкретная рекомендация 5"
+  ]
 }}
-ВАЖНО: Массив criteria_scores должен содержать РОВНО {count} объектов по каждому из критериев (id от 1 до {count}).
-По каждому критерию, если было нарушение (score 1 или 2), в timecodes ОБЯЗАТЕЛЬНО укажи массив точных таймкодов!"""
+ВАЖНО:
+1. Массив `criteria_scores` должен содержать РОВНО {count} объектов по каждому из критериев (id от 1 до {count}).
+2. Для КАЖДОГО критерия указывай `"timecodes"` и `"quote"`. При нарушении (`score` 1 или 2) в `timecodes` ОБЯЗАТЕЛЬНО передавай точные таймкоды вида `["ЧЧ:ММ:СС"]`.
+3. Если критерий не применим по формату занятия — ставь `"score": null` (не 0!) и объясни причину в `"details"`."""
 
-    if "ТРЕБОВАНИЕ К СТРУКТУРЕ JSON-ОТВЕТА" not in prompt:
+    if "criteria_scores" not in prompt or "timecodes" not in prompt:
         prompt += json_instructions
 
     return prompt.strip(), std_criteria
 
 
-def save_to_backup_rotation(task_record: Dict[str, Any]):
-    """
-    Сохраняет проверенную лекцию в кольцевой бэкап data/lecture_tasks_backup.json.
-    Строго держит не более 100 лекций: если добавляется новая, удаляется самая старая.
-    """
-    tasks_list = []
-    if os.path.exists(BACKUP_FILE):
-        try:
-            with open(BACKUP_FILE, "r", encoding="utf-8") as bf:
-                tasks_list = json.load(bf)
-                if not isinstance(tasks_list, list):
-                    tasks_list = []
-        except Exception:
-            tasks_list = []
+def _build_failed_task(
+    task_id: str,
+    lecture_url: str,
+    teacher_name: str,
+    subject: str,
+    group_name: str,
+    curator_email: str,
+    talk_metadata: Dict[str, Any],
+    error_message: str,
+    is_corrupted: bool = False,
+    raw_broken_response: Optional[str] = None
+) -> Dict[str, Any]:
+    return {
+        "id": task_id,
+        "lectureUrl": lecture_url,
+        "teacherName": teacher_name or "Преподаватель",
+        "subject": subject or "",
+        "groupName": group_name or "",
+        "date": talk_metadata.get("date") or time.strftime("%Y-%m-%d %H:%M"),
+        "totalScore": None,
+        "criticalViolations": [],
+        "positiveHighlights": [],
+        "recommendations": [],
+        "criteria": [],
+        "status": "failed",
+        "progressPct": 100,
+        "curatorEmail": curator_email,
+        "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "talkMetadata": talk_metadata,
+        "isCorrupted": is_corrupted,
+        "rawBrokenResponse": raw_broken_response,
+        "errorMessage": error_message,
+        "applicableCount": None,
+        "earnedPoints": None,
+        "maxPoints": None
+    }
 
-    # Удаляем дубликат по id
-    task_id = task_record.get("id")
-    tasks_list = [t for t in tasks_list if t.get("id") != task_id]
 
-    # Добавляем новую запись в начало
-    tasks_list.insert(0, task_record)
-
-    # Ротация: не более 100 лекций в каждый момент
-    if len(tasks_list) > MAX_BACKUP_TASKS:
-        tasks_list = tasks_list[:MAX_BACKUP_TASKS]
-
-    try:
-        with open(BACKUP_FILE, "w", encoding="utf-8") as bf:
-            json.dump(tasks_list, bf, ensure_ascii=False, indent=2)
-        print(f"[Backup] Бэкап обновлен (всего лекций: {len(tasks_list)} из max {MAX_BACKUP_TASKS})", file=sys.stderr)
-    except Exception as e:
-        print(f"[Backup] Предупреждение сохранения бэкапа: {e}", file=sys.stderr)
+def _cleanup_local_artifacts_sync(paths: List[Optional[str]], rec_id: str = "", task_id: str = ""):
+    for p in paths:
+        if p and os.path.exists(p):
+            try:
+                os.remove(p)
+            except Exception as e:
+                print(f"[152-ФЗ] Не удалось удалить {p}: {e}", file=sys.stderr)
+    if rec_id:
+        safe_prefix = re.sub(r"[^a-zA-Z0-9_\-]", "_", task_id).strip("_") if task_id else ""
+        pattern = os.path.join("artifacts", f"{rec_id}_{safe_prefix}_*" if safe_prefix else f"{rec_id}_*_gigachat_opt.jpg")
+        for leftover in glob.glob(pattern):
+            try:
+                os.remove(leftover)
+            except Exception:
+                pass
 
 
 async def execute_ktalk_gigachat_pipeline(
@@ -230,13 +288,11 @@ async def execute_ktalk_gigachat_pipeline(
     curator_email: str = "",
     additional_info: str = ""
 ) -> Dict[str, Any]:
-    print(f"\n==================================================", file=sys.stderr)
+    print("\n==================================================", file=sys.stderr)
     print(f"[Pipeline] Старт проверки лекции: {task_id}", file=sys.stderr)
     print(f"URL: {lecture_url} | Преподаватель (вход): {teacher_name}", file=sys.stderr)
 
-    api_key = fetch_talk.get_api_key()
-    meet_info = {}
-    talk_metadata = {
+    talk_metadata: Dict[str, Any] = {
         "title": "Онлайн-занятие КТалк",
         "url": lecture_url,
         "date": time.strftime("%Y-%m-%d %H:%M"),
@@ -245,212 +301,290 @@ async def execute_ktalk_gigachat_pipeline(
         "domain": "ktalk.ru"
     }
 
-    transcript_text = ""
-    summary_text = ""
+    api_key = fetch_talk.get_api_key()
+    if not api_key:
+        err = "Ключ API Контур.Толка (TALK_API_KEY) не настроен на сервере. Проверка невозможна."
+        print(f"[Pipeline] {err}", file=sys.stderr)
+        return _build_failed_task(task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata, err)
 
-    # 1. Запрашиваем метаданные через fetch_talk
-    if api_key:
+    giga_creds = os.getenv("GIGACHAT_CREDENTIALS")
+    if not giga_creds:
+        err = "Ключ GigaChat API (GIGACHAT_CREDENTIALS) не настроен на сервере. Проверка невозможна."
+        print(f"[Pipeline] {err}", file=sys.stderr)
+        return _build_failed_task(task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata, err)
+
+    rec_id = ""
+    artifacts: Dict[str, Any] = {}
+    audio_path: Optional[str] = None
+    image_paths: List[Tuple[int, str]] = []
+    client = None
+    uploaded_file_ids: List[str] = []
+
+    try:
         try:
-            meet_info = await fetch_talk.is_meet_available(lecture_url, api_key)
-            print(f"[KTalk] Получены метаданные встречи: {meet_info}", file=sys.stderr)
-            if meet_info:
-                talk_metadata["title"] = meet_info.get("title") or talk_metadata["title"]
-                talk_metadata["date"] = meet_info.get("date") or talk_metadata["date"]
-                talk_metadata["login"] = meet_info.get("login") or ""
-
-                fn = (meet_info.get("name") or "").strip()
-                sn = (meet_info.get("surname") or "").strip()
-                if fn or sn:
-                    real_teacher = f"{fn} {sn}".strip()
-                    talk_metadata["author"] = real_teacher
-                    # Если пользователь не вводил имя или оставил дефолт, используем реального учителя из КТалк
-                    if not teacher_name or teacher_name.strip() in ("Преподаватель", "Иванов И.И.", ""):
-                        teacher_name = real_teacher
-                        print(f"[KTalk] Определен реальный преподаватель из метаданных КТалк: {teacher_name}", file=sys.stderr)
-
-                # Попытка извлечь предмет из названия встречи (например "Экономика 9-10 класс")
-                title = meet_info.get("title", "")
-                if title and ("-" in title or "—" in title):
-                    parts = re.split(r"[-—]", title)
-                    candidate = parts[-1].strip()
-                    if len(candidate) > 2 and (not subject or subject == "Олимпиадная подготовка"):
-                        subject = candidate
-
-            # Получаем текстовые артефакты (транскрипт и саммари)
-            base_url = fetch_talk.get_base_url_from_url(lecture_url)
             rec_id = fetch_talk.extract_record_id(lecture_url)
             talk_metadata["recordingKey"] = rec_id
+        except Exception as rec_err:
+            return _build_failed_task(
+                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata,
+                f"Некорректная ссылка на запись КТалк: {rec_err}"
+            )
 
-            import httpx
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                artifacts_json = await fetch_talk.get_text_artifacts(client, base_url, rec_id, api_key)
-                if artifacts_json:
-                    os.makedirs("artifacts", exist_ok=True)
-                    text_paths = fetch_talk.process_and_save_text_artifacts(artifacts_json, rec_id, "artifacts")
-                    if text_paths.get("transcript") and os.path.exists(text_paths["transcript"]):
-                        with open(text_paths["transcript"], "r", encoding="utf-8") as tf:
-                            transcript_text = tf.read().strip()
-                        print(f"[KTalk] Загружен транскрипт встречи ({len(transcript_text)} символов)", file=sys.stderr)
-                    if text_paths.get("summary") and os.path.exists(text_paths["summary"]):
-                        with open(text_paths["summary"], "r", encoding="utf-8") as sf:
-                            summary_text = sf.read().strip()
-        except Exception as e:
-            print(f"[KTalk] Ошибка запроса артефактов КТалк: {e}", file=sys.stderr)
+        # 1. Загружаем метаданные встречи и все артефакты (видео + транскрипт + саммари)
+        emit_stage("downloading")
+        meet_info = await fetch_talk.is_meet_available(lecture_url, api_key)
+        print(f"[KTalk] Метаданные встречи: {meet_info}", file=sys.stderr)
+        if meet_info:
+            talk_metadata["title"] = meet_info.get("title") or talk_metadata["title"]
+            talk_metadata["date"] = meet_info.get("date") or talk_metadata["date"]
+            talk_metadata["login"] = meet_info.get("login") or ""
 
-    # 2. Подготовка системного промпта и критериев
-    system_prompt, active_criteria = build_system_prompt(additional_info)
+            fn = (meet_info.get("name") or "").strip()
+            sn = (meet_info.get("surname") or "").strip()
+            if fn or sn:
+                real_teacher = f"{fn} {sn}".strip()
+                talk_metadata["author"] = real_teacher
+                if not teacher_name or teacher_name.strip() in ("Преподаватель", ""):
+                    teacher_name = real_teacher
 
-    user_text = f"""--- МАТЕРИАЛЫ ЗАНЯТИЯ ДЛЯ АНАЛИЗА ---
+        artifacts = await fetch_talk.download_all_artifacts_by_url(lecture_url, api_key, task_prefix=task_id)
+        video_path = artifacts.get("video")
+
+        # ПРИНЦИП КРИСТАЛЬНОЙ ЧЕСТНОСТИ: если видео не скачалось — немедленная честная ошибка, без проверки вслепую!
+        if not video_path or not os.path.exists(video_path):
+            video_err = artifacts.get("video_error") or "Не удалось скачать видеозапись лекции с Контур.Толка."
+            err_msg = f"{video_err} По правилам честной проверки без видеозаписи (аудио и кадров) анализ не выполняется."
+            print(f"[Pipeline] Ошибка скачивания видео: {err_msg}", file=sys.stderr)
+            return _build_failed_task(
+                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata, err_msg
+            )
+
+        # 2. Нарезаем аудио и кадры из скачанного видео
+        emit_stage("extracting")
+        audio_path, image_paths = await file_processing.extract_media_async(video_path)
+
+        transcript_text = ""
+        summary_text = ""
+        if artifacts.get("transcript") and os.path.exists(artifacts["transcript"]):
+            with open(artifacts["transcript"], "r", encoding="utf-8") as tf:
+                transcript_text = tf.read().strip()
+        if artifacts.get("summary") and os.path.exists(artifacts["summary"]):
+            with open(artifacts["summary"], "r", encoding="utf-8") as sf:
+                summary_text = sf.read().strip()
+
+        # 3. Системный промпт, бюджет токенов и загрузка медиа в GigaChat
+        system_prompt, active_criteria = build_system_prompt(additional_info)
+        max_frames = ai_gigachat._calculate_dynamic_frame_limit(
+            transcript_text, summary_text, len(system_prompt), audio_path
+        )
+
+        emit_stage("uploading")
+        client = ai_gigachat.get_gigachat_client()
+        model_name = os.getenv("GIGACHAT_MODEL", "GigaChat-2-Pro")
+
+        audio_file_id, uploaded_frames_data = await ai_gigachat._upload_files_to_gigachat(
+            client, audio_path, image_paths, max_frames=max_frames
+        )
+
+        if audio_file_id:
+            uploaded_file_ids.append(audio_file_id)
+        uploaded_file_ids.extend([fid for _, fid, _ in uploaded_frames_data])
+
+        talk_metadata["hasAudio"] = bool(audio_file_id)
+        talk_metadata["framesUploaded"] = len(uploaded_frames_data)
+
+        if not uploaded_file_ids:
+            err_msg = "Не удалось загрузить аудиодорожку и видеокадры в облако GigaChat. Повторите проверку позже."
+            print(f"[Pipeline] {err_msg}", file=sys.stderr)
+            return _build_failed_task(
+                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata, err_msg
+            )
+
+        # Удаляем локальные временные медиа сразу после завершения загрузки в GigaChat
+        _cleanup_local_artifacts_sync(
+            [
+                video_path,
+                audio_path,
+                artifacts.get("audio"),
+                artifacts.get("transcript"),
+                artifacts.get("summary"),
+                *[p for _, p in image_paths]
+            ],
+            rec_id=rec_id,
+            task_id=task_id
+        )
+
+        audio_desc = (
+            f"- Полная аудиодорожка занятия прикреплена (ID файла: {audio_file_id})\n"
+            if audio_file_id
+            else "- Аудиодорожка не была извлечена.\n"
+        )
+        frames_description = "\n".join(
+            [f"- Кадр [{t_str}] (ID файла: {fid})" for t_str, fid, _ in uploaded_frames_data]
+        ) or "Кадры видео отсутствуют."
+
+        user_text = f"""--- МУЛЬТИМОДАЛЬНЫЕ МАТЕРИАЛЫ ЗАНЯТИЯ ---
 • Преподаватель: {teacher_name}
-• Предмет: {subject or 'Олимпиадная подготовка'}
-• Группа: {group_name or 'Основная группа'}
+• Предмет: {subject or 'Не указан'}
+• Группа: {group_name or 'Не указана'}
 • Название встречи в КТалк: {talk_metadata.get('title', 'Онлайн-занятие')}
 • Дата проведения: {talk_metadata.get('date', '')}
-• Автор по данным платформы КТалк: {talk_metadata.get('author', teacher_name)} ({talk_metadata.get('login', '')})
+• Автор по данным КТалк: {talk_metadata.get('author', teacher_name)} ({talk_metadata.get('login', '')})
 
+АУДИОДОРОЖКА ВСТРЕЧИ:
+{audio_desc}
+КЛЮЧЕВЫЕ КАДРЫ ЭКРАНА С ТАЙМКОДАМИ ({len(uploaded_frames_data)} шт.):
+{frames_description}
+
+--- ТЕКСТОВЫЕ МАТЕРИАЛЫ ---
 ИИ-Краткий пересказ встречи (Саммари):
 {summary_text if summary_text else 'Отсутствует'}
 
-Транскрипт общения с точными поминутными репликами спикеров:
-{transcript_text if transcript_text else 'Транскрипт не был предоставлен сервером КТалк. Проанализируй доступные регламентные критерии.'}
+Транскрипт общения с таймкодами реплик:
+{transcript_text if transcript_text else 'Транскрипт не предоставлен сервером КТалк; ориентируйся на аудиодорожку и кадры экрана.'}
 
 ИНСТРУКЦИЯ ПО АНАЛИЗУ:
-1. Внимательно сопоставь реплики и ход занятия с критериями оценивания.
-2. Для каждого критерия, если допущено нарушение (score 1 или 2), ОБЯЗАТЕЛЬНО укажи массив точных таймкодов в `timecodes`!
-3. Выдай итоговый ответ СТРОГО в виде валидного JSON-объекта."""
+1. Внимательно проанализируй аудиодорожку, прикреплённые кадры экрана и транскрипт в сопоставлении с критериями оценивания.
+2. По каждому критерию при нарушении (score 1 или 2) ОБЯЗАТЕЛЬНО укажи точные таймкоды в `timecodes` вида `["ЧЧ:ММ:СС"]` и подтверждающую цитату в `quote`.
+3. Оцени ровно {len(active_criteria)} критериев (`id` от 1 до {len(active_criteria)}). Неприменимые по формату критерии отмечай как `null`.
+4. Выдай итоговый ответ СТРОГО в виде валидного JSON-объекта."""
 
-    # 3. Обращение к GigaChat через ai_gigachat.py (таймаут 600 сек)
-    model_name = os.getenv("GIGACHAT_MODEL", "GigaChat-2-Pro")
-    print(f"[GigaChat] Инициализация клиента GigaChat ({model_name})...", file=sys.stderr)
+        # 4. Мультимодальный запрос в GigaChat
+        emit_stage("analyzing")
+        chat_payload = Chat(
+            model=model_name,
+            messages=[
+                Messages(role=MessagesRole.SYSTEM, content=system_prompt),
+                Messages(role=MessagesRole.USER, content=user_text, attachments=uploaded_file_ids)
+            ],
+            max_tokens=8192,
+            temperature=0.1
+        )
 
-    client = ai_gigachat.get_gigachat_client()
-    chat_payload = Chat(
-        model=model_name,
-        messages=[
-            Messages(role=MessagesRole.SYSTEM, content=system_prompt),
-            Messages(role=MessagesRole.USER, content=user_text)
-        ],
-        max_tokens=8192,
-        temperature=0.1
-    )
-
-    raw_response = ""
-    is_corrupted = False
-    parsed_result = None
-
-    try:
+        raw_response = ""
         t_start = time.time()
-        print(f"[GigaChat] Отправка запроса на анализ встречи (DB ID: {task_id})...", file=sys.stderr)
-        resp = await client.achat(chat_payload)
+        print(
+            f"[GigaChat] Отправка мультимодального запроса ({model_name}, вложений: {len(uploaded_file_ids)})...",
+            file=sys.stderr
+        )
+
+        max_retries = 5
+        resp = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = await client.achat(chat_payload)
+                break
+            except Exception as attempt_err:
+                err_str = str(attempt_err)
+                is_rate_limit = (
+                    "429" in err_str
+                    or "Too Many Requests" in err_str
+                    or "RateLimit" in type(attempt_err).__name__
+                )
+                if is_rate_limit and attempt < max_retries:
+                    wait_time = attempt * 7
+                    print(
+                        f"[GigaChat] Ошибка 429 (Too Many Requests). Повтор {attempt}/{max_retries} через {wait_time} сек...",
+                        file=sys.stderr
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    tb = traceback.format_exc()
+                    return _build_failed_task(
+                        task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata,
+                        f"Ошибка обращения к GigaChat API: {attempt_err}",
+                        is_corrupted=False,
+                        raw_broken_response=f"{attempt_err}\n\n{tb}"
+                    )
+
         gen_time = time.time() - t_start
-        print(f"[GigaChat] Ответ успешно получен за {gen_time:.2f} сек!", file=sys.stderr)
+        print(f"[GigaChat] Ответ получен за {gen_time:.2f} сек!", file=sys.stderr)
 
-        if resp.choices and resp.choices[0].message:
-            raw_response = resp.choices[0].message.content or ""
-        else:
-            raw_response = str(resp)
+        choices = resp.choices if resp and hasattr(resp, "choices") else []
+        if not choices or not getattr(choices[0], "message", None):
+            return _build_failed_task(
+                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata,
+                "GigaChat вернул пустой ответ (choices отсутствует).",
+                is_corrupted=True,
+                raw_broken_response=str(resp)
+            )
 
-        # Проверка на цензуру/отказ модели
+        choice = choices[0]
+        finish_reason = getattr(choice, "finish_reason", None)
+        raw_response = choice.message.content or ""
+
         refusal_keywords = [
             "разговоры на чувствительные темы",
             "ограничены из соображений безопасности",
             "не могу ответить на данный вопрос",
-            "не могу выполнить данный запрос"
+            "не могу выполнить данный запрос",
+            "модели не обладают собственным мнением",
+            "чувствительные темы могут быть ограничены"
         ]
-        if any(kw in raw_response.lower() for kw in refusal_keywords):
-            print(f"[GigaChat] Предупреждение: отказ модели по соображениям безопасности.", file=sys.stderr)
-            is_corrupted = True
+        is_refused = (
+            finish_reason in ["blacklist", "content_filter", "censorship"]
+            or any(kw in raw_response.lower() for kw in refusal_keywords)
+        )
+        if is_refused:
+            return _build_failed_task(
+                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata,
+                f"Нейросеть отказалась проверять лекцию (причина: {finish_reason or 'цензура безопасности'}).",
+                is_corrupted=True,
+                raw_broken_response=raw_response
+            )
 
-    except Exception as giga_err:
-        tb = traceback.format_exc()
-        print(f"[GigaChat] Ошибка вызова GigaChat API: {giga_err}\n{tb}", file=sys.stderr)
-        raw_response = f"ОШИБКА GIGACHAT API: {giga_err}\n\n{tb}"
-        is_corrupted = True
-    finally:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
-
-    # 4. Парсинг ответа через ai_common.py
-    if not is_corrupted and raw_response:
+        # 5. Парсинг ответа через ai_common.py
         try:
             parsed_result = ai_common.parse_analysis_json(raw_response)
-            print(f"[ai_common] JSON успешно распарсен! Балл: {parsed_result.get('final_percentage')}%, Критично: {parsed_result.get('is_critical')}", file=sys.stderr)
         except Exception as parse_err:
-            print(f"[ai_common] Не удалось распарсить JSON даже после json_repair: {parse_err}", file=sys.stderr)
-            is_corrupted = True
+            print(f"[ai_common] Ошибка парсинга JSON: {parse_err}", file=sys.stderr)
+            return _build_failed_task(
+                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata,
+                f"Не удалось разобрать JSON-ответ нейросети: {parse_err}",
+                is_corrupted=True,
+                raw_broken_response=raw_response
+            )
 
-    # 5. Формирование итоговой структуры задачи
-    if is_corrupted or not parsed_result:
-        # Режим поврежденного разбора
-        final_criteria = [
-            {
-                "id": c.get("id", i+1),
-                "text": c.get("text", c.get("title", "")),
-                "category": c.get("category", "Методический стандарт"),
-                "passed": False,
-                "score": 0,
-                "timecodes": [],
-                "comment": "Ответ модели повреждён и не может быть структурирован.",
-                "quote": ""
-            }
-            for i, c in enumerate(active_criteria)
-        ]
-
-        result_task = {
-            "id": task_id,
-            "lectureUrl": lecture_url,
-            "teacherName": teacher_name,
-            "subject": subject or "Олимпиадная подготовка",
-            "groupName": group_name or "Основная группа",
-            "date": talk_metadata.get("date") or time.strftime("%Y-%m-%d %H:%M"),
-            "totalScore": 0,
-            "criticalViolations": ["Ответ нейросети не удалось распарсить в корректный JSON."],
-            "positiveHighlights": [],
-            "recommendations": ["Рекомендуется открыть сырой ответ ИИ по кнопке в дашборде или запустить повторный анализ."],
-            "criteria": final_criteria,
-            "status": "completed",
-            "progressPct": 100,
-            "curatorEmail": curator_email,
-            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "talkMetadata": talk_metadata,
-            "isCorrupted": True,
-            "rawBrokenResponse": raw_response
-        }
-    else:
-        # Успешный результат
-        is_crit = parsed_result.get("is_critical", False)
+        # 6. Честный подсчет баллов без искусственных обнулений и с поддержкой Н/П (null)
+        is_crit = bool(parsed_result.get("is_critical", False))
         crit_details = parsed_result.get("critical_details") or []
         scores_arr = parsed_result.get("criteria_scores") or []
 
         scores_by_id: Dict[int, Dict[str, Any]] = {}
         for s in scores_arr:
-            if isinstance(s, dict) and "id" in s:
-                try:
-                    cid = int(s["id"])
-                    scores_by_id[cid] = s
-                except (ValueError, TypeError):
-                    pass
+            if isinstance(s, dict):
+                raw_cid = s.get("id", s.get("criterion_id"))
+                if raw_cid is not None:
+                    try:
+                        scores_by_id[int(raw_cid)] = s
+                    except (ValueError, TypeError):
+                        pass
+
+        use_index_fallback = len(scores_arr) == len(active_criteria)
 
         final_criteria = []
-        earned_sum = 0
-        max_sum = len(active_criteria) * 2
+        applicable_count = 0
+        earned_raw = 0
+        max_raw = 0
+        earned_five_points = 0
 
         for i, c in enumerate(active_criteria):
-            cid = c.get("id", i+1)
-            ai_data = scores_by_id.get(cid, {})
+            cid = i + 1
+            ai_data = scores_by_id.get(cid)
+            if ai_data is None and use_index_fallback and isinstance(scores_arr[i], dict):
+                ai_data = scores_arr[i]
+            ai_data = ai_data or {}
+
             score_val = ai_data.get("score")
 
-            # Таймкоды нарушений
             t_codes = ai_data.get("timecodes", [])
             if isinstance(t_codes, str) and t_codes.strip():
                 t_codes = [t_codes.strip()]
             elif not isinstance(t_codes, list):
                 t_codes = []
+            t_codes = [str(tc).strip() for tc in t_codes if tc is not None and str(tc).strip()]
 
             details_text = str(ai_data.get("details") or "").strip()
-            # Авто-поиск таймкодов в details если массив пуст
             if not t_codes and details_text:
                 found = re.findall(r"\b(?:\d{1,2}:)?\d{2}:\d{2}\b", details_text)
                 if found:
@@ -458,67 +592,87 @@ async def execute_ktalk_gigachat_pipeline(
 
             quote_text = str(ai_data.get("quote") or "").strip()
 
-            if score_val is None or str(score_val).lower() in ("null", "none"):
-                passed = True
-                crit_score = 5
-                details_text = details_text or "Критерий не применим к формату данного урока."
+            is_na = (
+                score_val is None
+                or isinstance(score_val, bool)
+                or (isinstance(score_val, str) and score_val.strip().lower() in ("", "null", "none", "н/п", "н/д", "n/a", "na", "не применим"))
+            )
+
+            if is_na:
+                final_criteria.append({
+                    "id": cid,
+                    "text": c["text"],
+                    "category": c["category"],
+                    "passed": True,
+                    "notApplicable": True,
+                    "score": None,
+                    "penaltyScore": None,
+                    "timecodes": t_codes,
+                    "comment": details_text or "Критерий не применим к формату данного занятия.",
+                    "quote": quote_text
+                })
             else:
                 try:
-                    deducted = int(score_val)
+                    deducted = max(0, min(2, int(float(score_val))))
                 except (ValueError, TypeError):
                     deducted = 0
+
+                applicable_count += 1
+                max_raw += 2
+                earned_raw += max(0, 2 - deducted)
 
                 if deducted == 0:
                     passed = True
                     crit_score = 5
                     details_text = details_text or "Выполнено качественно, нарушений нет."
-                    earned_sum += 2
                 elif deducted == 1:
                     passed = False
                     crit_score = 3
                     details_text = details_text or "Зафиксировано небольшое нарушение."
-                    earned_sum += 1
                 else:
                     passed = False
                     crit_score = 1
                     details_text = details_text or "Зафиксировано грубое или систематическое нарушение."
-                    earned_sum += 0
 
-            final_criteria.append({
-                "id": cid,
-                "text": c.get("text", c.get("title", "")),
-                "category": c.get("category", "Методический стандарт"),
-                "passed": passed,
-                "score": crit_score,
-                "timecodes": t_codes,
-                "comment": details_text,
-                "quote": quote_text
-            })
+                earned_five_points += crit_score
+                final_criteria.append({
+                    "id": cid,
+                    "text": c["text"],
+                    "category": c["category"],
+                    "passed": passed,
+                    "notApplicable": False,
+                    "score": crit_score,
+                    "penaltyScore": deducted,
+                    "timecodes": t_codes,
+                    "comment": details_text,
+                    "quote": quote_text
+                })
 
-        final_pct = parsed_result.get("final_percentage")
-        if final_pct is not None:
-            total_score_pct = int(round(final_pct))
-        else:
-            total_score_pct = int(round((earned_sum / max_sum) * 100)) if max_sum > 0 else 100
+        if applicable_count <= 0:
+            return _build_failed_task(
+                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata,
+                "Нейросеть отметила все критерии как неприменимые — расчёт оценки невозможен.",
+                is_corrupted=True,
+                raw_broken_response=raw_response
+            )
 
-        if is_crit:
-            total_score_pct = min(total_score_pct, 45)
+        total_score_pct = int(round((earned_raw / max_raw) * 100))
+        max_five_points = applicable_count * 5
 
-        comment_full = parsed_result.get("comment", "")
-        recs_full = parsed_result.get("recommendations", "")
-        rec_list = [r.strip() for r in recs_full.split("\n") if r.strip() and len(r.strip()) > 5]
+        rec_list = parsed_result.get("recommendations_list") or []
         if not rec_list:
-            rec_list = [recs_full] if recs_full else ["Продолжать совершенствовать педагогическое мастерство."]
+            recs_full = str(parsed_result.get("recommendations") or "").strip()
+            rec_list = [r.strip() for r in recs_full.split("\n") if r.strip() and len(r.strip()) > 3]
 
-        passed_crits = [c for c in final_criteria if c["passed"]]
+        passed_crits = [c for c in final_criteria if not c.get("notApplicable") and c["passed"]]
         pos_highlights = [f"«{c['category']}»: {c['comment']}" for c in passed_crits[:3]]
 
         result_task = {
             "id": task_id,
             "lectureUrl": lecture_url,
             "teacherName": teacher_name,
-            "subject": subject or "Олимпиадная подготовка",
-            "groupName": group_name or "Основная группа",
+            "subject": subject or "",
+            "groupName": group_name or "",
             "date": talk_metadata.get("date") or time.strftime("%Y-%m-%d %H:%M"),
             "totalScore": total_score_pct,
             "criticalViolations": crit_details if is_crit else [],
@@ -531,13 +685,34 @@ async def execute_ktalk_gigachat_pipeline(
             "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "talkMetadata": talk_metadata,
             "isCorrupted": False,
-            "rawBrokenResponse": None
+            "rawBrokenResponse": None,
+            "errorMessage": None,
+            "applicableCount": applicable_count,
+            "earnedPoints": earned_five_points,
+            "maxPoints": max_five_points
         }
+        return result_task
 
-    # 6. Кольцевой авто-бэкап (не более 100 лекций, FIFO)
-    save_to_backup_rotation(result_task)
-
-    return result_task
+    finally:
+        if client is not None:
+            if uploaded_file_ids:
+                await ai_gigachat._cleanup_gigachat_files(client, uploaded_file_ids)
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+        _cleanup_local_artifacts_sync(
+            [
+                artifacts.get("video"),
+                audio_path,
+                artifacts.get("audio"),
+                artifacts.get("transcript"),
+                artifacts.get("summary"),
+                *[p for _, p in image_paths]
+            ],
+            rec_id=rec_id,
+            task_id=task_id
+        )
 
 
 def main():
@@ -551,8 +726,8 @@ def main():
     t_id = sys.argv[1]
     l_url = sys.argv[2]
     t_name = sys.argv[3] if len(sys.argv) > 3 else "Преподаватель"
-    subj = sys.argv[4] if len(sys.argv) > 4 else "Олимпиадная подготовка"
-    grp = sys.argv[5] if len(sys.argv) > 5 else "Основная группа"
+    subj = sys.argv[4] if len(sys.argv) > 4 else ""
+    grp = sys.argv[5] if len(sys.argv) > 5 else ""
     curator = sys.argv[6] if len(sys.argv) > 6 else "shurygin.egor2009@gmail.com"
     add_info = sys.argv[7] if len(sys.argv) > 7 else ""
 

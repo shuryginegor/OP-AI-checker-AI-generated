@@ -99,11 +99,11 @@ async def process_single_task(job: dict, notifier: DirectTelegramNotifier):
     artifacts = None
     try:
         # 1. Скачивание видеозаписи и текстовых материалов
-        artifacts = await fetch_talk.download_all_artifacts_by_url(link, fetch_talk.get_api_key())
+        artifacts = await fetch_talk.download_all_artifacts_by_url(link, fetch_talk.get_api_key(), task_prefix=f"worker_{response_id}")
         if not artifacts or not artifacts.get("video"):
-            err_msg = "Не удалось скачать видеозапись лекции с КТалк. Проверьте права доступа к записи."
+            err_msg = artifacts.get("video_error") if isinstance(artifacts, dict) and artifacts.get("video_error") else "Не удалось скачать видеозапись лекции с КТалк. Проверьте права доступа к записи."
             logger.error(f"[Воркер РФ] {err_msg} (response_id: {response_id})")
-            await database.write_result(response_id, 0, True, err_msg)
+            await database.write_result(response_id, -2, True, err_msg)
             await notifier.send_message(tg_id, f"❌ Ошибка проверки лекции #{response_id}: {err_msg}")
             return
 
@@ -113,21 +113,22 @@ async def process_single_task(job: dict, notifier: DirectTelegramNotifier):
             f"⚙️ Выполняем нарезку аудио, извлечение кадров и отправку в Сбер GigaChat-2-Pro..."
         )
 
-        # 2. Обработка медиафайлов и отправка в GigaChat
+        # 2. Последовательная обработка медиафайлов и ожидание полного ответа GigaChat (во избежание 429)
         job_name = await ai.process(
             artifacts,
             additional_info,
             bot=notifier,
             tg_id=tg_id,
-            db_id=response_id
+            db_id=response_id,
+            await_completion=True
         )
         await database.write_job_name(response_id, job_name)
-        logger.info(f"[Воркер РФ] Лекция #{response_id} передана в GigaChat (job_name: {job_name})")
+        logger.info(f"[Воркер РФ] Лекция #{response_id} обработана в GigaChat (job_name: {job_name})")
 
     except Exception as e:
         tb = traceback.format_exc()
         logger.error(f"[Воркер РФ] Критическая ошибка обработки лекции #{response_id}: {e}\n{tb}")
-        await database.write_result(response_id, 0, True, f"Внутренняя ошибка воркера: {e}")
+        await database.write_result(response_id, -2, True, f"Внутренняя ошибка воркера: {e}")
         await notifier.send_message(
             tg_id,
             f"❌ Произошла ошибка при обработке лекции #{response_id} нейросетью: {html.escape(str(e))}",
@@ -150,6 +151,7 @@ async def run_worker_loop():
     await database.init_db()
 
     notifier = DirectTelegramNotifier(BOT_TOKEN)
+    await ai.check_batch_jobs_loop(notifier)
 
     try:
         while True:

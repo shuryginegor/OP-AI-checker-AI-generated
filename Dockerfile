@@ -2,7 +2,7 @@
 # ------------------------------------------------------------------------------
 # Stage 1: Build Frontend and Node Server
 # ------------------------------------------------------------------------------
-FROM node:20-bookworm-slim AS builder
+FROM node:22-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -23,7 +23,7 @@ RUN npm run build
 # ------------------------------------------------------------------------------
 # Stage 2: Production Runtime (Node.js + Python 3 + FFmpeg)
 # ------------------------------------------------------------------------------
-FROM node:20-bookworm-slim AS runner
+FROM node:22-bookworm-slim AS runner
 
 # Set timezone and non-interactive frontend
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -70,6 +70,10 @@ COPY *.ts ./
 COPY db_schema.jpg ./
 COPY COMPLIANCE_152FZ.md ./
 COPY certs ./certs
+
+# Install trusted Russian CA certificates for GigaChat / KTalk TLS
+RUN cp certs/russian_trusted_root_ca.pem /usr/local/share/ca-certificates/russian_trusted_root_ca.crt && \
+    update-ca-certificates
 
 # Prepare directory for persistent prompts and files storage
 RUN mkdir -p /app/data && chmod 777 /app/data

@@ -91,6 +91,9 @@ export const CriteriaManager: React.FC<CriteriaManagerProps> = ({
   const [critTitleInput, setCritTitleInput] = useState<string>('');
   const [critDescInput, setCritDescInput] = useState<string>('');
 
+  // Модальное окно подтверждения удаления без нативных диалогов браузера
+  const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<{ type: 'standard' | 'critical'; id: number } | null>(null);
+
   // Модальное окно подтверждения 2FA OTP
   const [showOtpModal, setShowOtpModal] = useState<boolean>(false);
   const [otpCode, setOtpCode] = useState<string>('');
@@ -98,6 +101,12 @@ export const CriteriaManager: React.FC<CriteriaManagerProps> = ({
   const [isVerifyingOtp, setIsVerifyingOtp] = useState<boolean>(false);
   const [otpError, setOtpError] = useState<string>('');
   const [otpMessage, setOtpMessage] = useState<string>('');
+
+  const renumberStandard = (list: StandardCriterion[]): StandardCriterion[] =>
+    list.map((item, idx) => ({ ...item, id: idx + 1 }));
+
+  const renumberCritical = (list: CriticalCriterion[]): CriticalCriterion[] =>
+    list.map((item, idx) => ({ ...item, id: idx + 1 }));
 
   // Загрузка конфигурации из БД
   const fetchCriteriaConfig = async () => {
@@ -179,23 +188,26 @@ export const CriteriaManager: React.FC<CriteriaManagerProps> = ({
     }
 
     if (editingStandardId !== null) {
-      // Редактирование
       setDraftStandard((prev) =>
-        prev.map((c) =>
-          c.id === editingStandardId
-            ? { ...c, category: finalCategory, text: finalText }
-            : c
+        renumberStandard(
+          prev.map((c) =>
+            c.id === editingStandardId
+              ? { ...c, category: finalCategory, text: finalText }
+              : c
+          )
         )
       );
     } else {
-      // Создание нового
-      const maxId = draftStandard.reduce((m, item) => Math.max(m, item.id), 0);
-      const newCriterion: StandardCriterion = {
-        id: maxId + 1,
-        category: finalCategory,
-        text: finalText
-      };
-      setDraftStandard((prev) => [...prev, newCriterion]);
+      setDraftStandard((prev) =>
+        renumberStandard([
+          ...prev,
+          {
+            id: prev.length + 1,
+            category: finalCategory,
+            text: finalText
+          }
+        ])
+      );
     }
 
     setIsEditingStandard(false);
@@ -203,13 +215,7 @@ export const CriteriaManager: React.FC<CriteriaManagerProps> = ({
   };
 
   const handleDeleteStandard = (id: number) => {
-    if (
-      window.confirm(
-        `Вы уверены, что хотите удалить стандартный критерий №${id}?`
-      )
-    ) {
-      setDraftStandard((prev) => prev.filter((item) => item.id !== id));
-    }
+    setConfirmDeleteTarget({ type: 'standard', id });
   };
 
   // --- Операции с Критическими критериями ---
@@ -239,18 +245,23 @@ export const CriteriaManager: React.FC<CriteriaManagerProps> = ({
 
     if (editingCriticalId !== null) {
       setDraftCritical((prev) =>
-        prev.map((c) =>
-          c.id === editingCriticalId ? { ...c, title, desc } : c
+        renumberCritical(
+          prev.map((c) =>
+            c.id === editingCriticalId ? { ...c, title, desc } : c
+          )
         )
       );
     } else {
-      const maxId = draftCritical.reduce((m, item) => Math.max(m, item.id), 0);
-      const newCrit: CriticalCriterion = {
-        id: maxId + 1,
-        title,
-        desc
-      };
-      setDraftCritical((prev) => [...prev, newCrit]);
+      setDraftCritical((prev) =>
+        renumberCritical([
+          ...prev,
+          {
+            id: prev.length + 1,
+            title,
+            desc
+          }
+        ])
+      );
     }
 
     setIsEditingCritical(false);
@@ -258,13 +269,21 @@ export const CriteriaManager: React.FC<CriteriaManagerProps> = ({
   };
 
   const handleDeleteCritical = (id: number) => {
-    if (
-      window.confirm(
-        `Вы уверены, что хотите удалить критический критерий №${id}?`
-      )
-    ) {
-      setDraftCritical((prev) => prev.filter((item) => item.id !== id));
+    setConfirmDeleteTarget({ type: 'critical', id });
+  };
+
+  const handleConfirmDeleteTarget = () => {
+    if (!confirmDeleteTarget) return;
+    if (confirmDeleteTarget.type === 'standard') {
+      setDraftStandard((prev) =>
+        renumberStandard(prev.filter((item) => item.id !== confirmDeleteTarget.id))
+      );
+    } else {
+      setDraftCritical((prev) =>
+        renumberCritical(prev.filter((item) => item.id !== confirmDeleteTarget.id))
+      );
     }
+    setConfirmDeleteTarget(null);
   };
 
   // --- 2FA OTP Этапы Сохранения ---
@@ -317,6 +336,9 @@ export const CriteriaManager: React.FC<CriteriaManagerProps> = ({
     setIsVerifyingOtp(true);
     setOtpError('');
 
+    const normalizedStd = renumberStandard(draftStandard);
+    const normalizedCrit = renumberCritical(draftCritical);
+
     try {
       const res = await fetch('/api/criteria/confirm-save', {
         method: 'POST',
@@ -326,15 +348,19 @@ export const CriteriaManager: React.FC<CriteriaManagerProps> = ({
         },
         body: JSON.stringify({
           code: otpCode.trim(),
-          standardCriteria: draftStandard,
-          criticalCriteria: draftCritical
+          standardCriteria: normalizedStd,
+          criticalCriteria: normalizedCrit
         })
       });
 
       const data = await res.json();
       if (data.success) {
-        setSavedStandard(JSON.parse(JSON.stringify(draftStandard)));
-        setSavedCritical(JSON.parse(JSON.stringify(draftCritical)));
+        const finalStd = Array.isArray(data.standardCriteria) ? data.standardCriteria : normalizedStd;
+        const finalCrit = Array.isArray(data.criticalCriteria) ? data.criticalCriteria : normalizedCrit;
+        setSavedStandard(JSON.parse(JSON.stringify(finalStd)));
+        setSavedCritical(JSON.parse(JSON.stringify(finalCrit)));
+        setDraftStandard(JSON.parse(JSON.stringify(finalStd)));
+        setDraftCritical(JSON.parse(JSON.stringify(finalCrit)));
         setShowOtpModal(false);
         setOtpCode('');
         setSuccessMsg(data.message || 'Критерии успешно сохранены в БД!');
@@ -343,7 +369,7 @@ export const CriteriaManager: React.FC<CriteriaManagerProps> = ({
         setOtpError(data.message || 'Неверный код 2FA подтверждения');
       }
     } catch (err) {
-      setOtpError(' Ошибка сохранения данных на сервере');
+      setOtpError('Ошибка сохранения данных на сервере');
     } finally {
       setIsVerifyingOtp(false);
     }
@@ -984,6 +1010,41 @@ export const CriteriaManager: React.FC<CriteriaManagerProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- ВНУТРИПРОГРАММНОЕ ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ КРИТЕРИЯ --- */}
+      {confirmDeleteTarget && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#1B153B] border border-red-500/40 rounded-2xl max-w-sm w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-red-500/15 border border-red-500/30 text-red-400 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Удаление критерия №{confirmDeleteTarget.id}</h3>
+                <p className="text-xs text-indigo-300 mt-0.5">
+                  Остальные критерии автоматически перенумеруются без пропусков (1..N).
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteTarget(null)}
+                className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl transition cursor-pointer"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteTarget}
+                className="flex-1 py-2 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl transition cursor-pointer"
+              >
+                Удалить
+              </button>
+            </div>
           </div>
         </div>
       )}

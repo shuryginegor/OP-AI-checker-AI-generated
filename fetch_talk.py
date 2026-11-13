@@ -25,7 +25,7 @@ def get_api_key() -> str:
 def extract_record_id(url: str) -> str:
     """Извлекает уникальный ID записи (recordingKey) из ссылки."""
     logger.debug(f"Извлечение ID записи из URL: {url}")
-    match = re.search(r"/(?:recordings|records)/([a-zA-Z0-9\-]+)", url)
+    match = re.search(r"/(?:recordings|records)/([a-zA-Z0-9\-_]+)", url)
     if match:
         rec_id = match.group(1)
         logger.debug(f"Успешно извлечен ID записи: {rec_id}")
@@ -44,7 +44,7 @@ def get_base_url_from_url(recording_url: str) -> str:
 
 
 async def download_talk_video(client: httpx.AsyncClient, base_url: str, recording_key: str, api_key: str,
-                              output_path: str, quality: str = "900p") -> bool:
+                              output_path: str, quality: str = "900p", error_out: dict | None = None) -> bool:
     """Скачивает видеозапись асинхронно и сохраняет её напрямую на диск."""
     headers = {"X-Auth-Token": api_key, "Accept": "application/octet-stream"}
     endpoint = f"{base_url}/Recordings/{recording_key}/file/{quality}"
@@ -56,10 +56,14 @@ async def download_talk_video(client: httpx.AsyncClient, base_url: str, recordin
         total_downloaded = 0
         async with client.stream("GET", endpoint, headers=headers, params=params) as response:
             if response.status_code != 200:
-                error_text = await response.aread()
-                logger.warning(
-                    f"Не удалось скачать видео (Код {response.status_code}): {error_text.decode('utf-8', errors='ignore')}"
-                )
+                error_bytes = await response.aread()
+                error_body = error_bytes.decode("utf-8", errors="ignore").strip()
+                msg = f"HTTP {response.status_code} при скачивании видеозаписи с КТалк"
+                if error_body:
+                    msg += f": {error_body[:240]}"
+                logger.warning(msg)
+                if error_out is not None:
+                    error_out["error"] = msg
                 return False
 
             with open(output_path, "wb") as f:
@@ -68,11 +72,31 @@ async def download_talk_video(client: httpx.AsyncClient, base_url: str, recordin
                         f.write(chunk)
                         total_downloaded += len(chunk)
 
+            if total_downloaded <= 0:
+                msg = "Сервер КТалк вернул пустой видеофайл (0 байт)."
+                logger.warning(msg)
+                if os.path.exists(output_path):
+                    try:
+                        os.remove(output_path)
+                    except Exception:
+                        pass
+                if error_out is not None:
+                    error_out["error"] = msg
+                return False
+
             size_mb = total_downloaded / (1024 * 1024)
             logger.info(f"Видео успешно сохранено на диск: {output_path} (Размер: {size_mb:.2f} MB)")
             return True
     except Exception as e:
-        logger.error(f"Ошибка при скачивании видео: {e}", exc_info=True)
+        msg = f"Ошибка сети или ввода-вывода при скачивании видео: {e}"
+        logger.error(msg, exc_info=True)
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+        if error_out is not None:
+            error_out["error"] = msg
         return False
 
 
@@ -93,9 +117,11 @@ async def get_text_artifacts(client: httpx.AsyncClient, base_url: str, recording
         return None
 
 
-def process_and_save_text_artifacts(artifacts_data: dict, recording_key: str, folder_path: str) -> dict:
+def process_and_save_text_artifacts(artifacts_data: dict, recording_key: str, folder_path: str, file_prefix: str = "") -> dict:
     """Парсит JSON-ответ, сохраняет файлы на диск и возвращает абсолютные пути к ним."""
     paths = {"transcript": None, "summary": None}
+    safe_prefix = re.sub(r"[^a-zA-Z0-9_\-]", "_", file_prefix).strip("_") if file_prefix else ""
+    base_name = f"{recording_key}_{safe_prefix}" if safe_prefix else recording_key
 
     # 1. Формируем и сохраняем Текстовую Расшифровку (Транскрипт)
     transcription_data = artifacts_data.get("transcriptionV2") or {}
@@ -120,14 +146,16 @@ def process_and_save_text_artifacts(artifacts_data: dict, recording_key: str, fo
 
     if all_extracted_chunks:
         all_extracted_chunks.sort(key=lambda x: x["time_ms"])
-        transcript_path = os.path.abspath(os.path.join(folder_path, f"{recording_key}_transcript.txt"))
+        transcript_path = os.path.abspath(os.path.join(folder_path, f"{base_name}_transcript.txt"))
 
         with open(transcript_path, "w", encoding="utf-8") as f:
             for item in all_extracted_chunks:
-                offset_ms = item["time_ms"]
-                seconds = (offset_ms // 1000) % 60
-                minutes = (offset_ms // (1000 * 60)) % 60
-                time_str = f"[{minutes:02d}:{seconds:02d}]"
+                offset_ms = int(item.get("time_ms") or 0)
+                total_sec = max(0, offset_ms // 1000)
+                hours = total_sec // 3600
+                minutes = (total_sec % 3600) // 60
+                seconds = total_sec % 60
+                time_str = f"[{hours:02d}:{minutes:02d}:{seconds:02d}]" if hours > 0 else f"[{minutes:02d}:{seconds:02d}]"
                 f.write(f"{time_str} {item['speaker']}: {item['text']}\n")
 
         logger.info(f"Транскрипция успешно записана на диск: {transcript_path}")
@@ -140,7 +168,7 @@ def process_and_save_text_artifacts(artifacts_data: dict, recording_key: str, fo
     summary_chunks = summary_data.get("chunks", []) if isinstance(summary_data, dict) else []
 
     if summary_chunks:
-        summary_path = os.path.abspath(os.path.join(folder_path, f"{recording_key}_summary.txt"))
+        summary_path = os.path.abspath(os.path.join(folder_path, f"{base_name}_summary.txt"))
 
         with open(summary_path, "w", encoding="utf-8") as f:
             f.write(f"Краткий пересказ встречи {recording_key}\n\n")
@@ -174,7 +202,7 @@ def process_and_save_text_artifacts(artifacts_data: dict, recording_key: str, fo
     return paths
 
 
-async def download_all_artifacts_by_url(record_url: str, api_key: str) -> dict:
+async def download_all_artifacts_by_url(record_url: str, api_key: str, task_prefix: str = "") -> dict:
     """Главная асинхронная функция-воркер. Возвращает словарь с абсолютными путями к сохраненным файлам."""
     try:
         if not api_key:
@@ -182,25 +210,26 @@ async def download_all_artifacts_by_url(record_url: str, api_key: str) -> dict:
 
         base_url = get_base_url_from_url(record_url)
         recording_key = extract_record_id(record_url)
+        safe_prefix = re.sub(r"[^a-zA-Z0-9_\-]", "_", task_prefix).strip("_") if task_prefix else ""
+        base_name = f"{recording_key}_{safe_prefix}" if safe_prefix else recording_key
 
         # Создаем целевую директорию artifacts
         artifacts_dir = "artifacts"
         os.makedirs(artifacts_dir, exist_ok=True)
 
-        video_output_path = os.path.join(artifacts_dir, f"{recording_key}_video.mp4")
-        audio_output_path = os.path.join(artifacts_dir, f"{recording_key}_audio.mp3")
+        video_output_path = os.path.join(artifacts_dir, f"{base_name}_video.mp4")
 
         # Настройки таймаутов, убирающие ошибку ReadTimeout при скачивании тяжелых видео чанками
         timeout_settings = httpx.Timeout(connect=15.0, read=None, write=20.0, pool=15.0)
 
         video_res = None
         artifacts_res = None
+        video_err_box: dict = {}
 
         async with httpx.AsyncClient(timeout=timeout_settings) as client:
             video_task = asyncio.create_task(
-                download_talk_video(client, base_url, recording_key, api_key, video_output_path, quality="900p")
+                download_talk_video(client, base_url, recording_key, api_key, video_output_path, quality="900p", error_out=video_err_box)
             )
-            # В gather оставляем только независимые задачи: скачивание видео и получение текста
             artifacts_task = asyncio.create_task(
                 get_text_artifacts(client, base_url, recording_key, api_key)
             )
@@ -210,40 +239,42 @@ async def download_all_artifacts_by_url(record_url: str, api_key: str) -> dict:
             video_res = results[0]
             artifacts_res = results[1]
 
-        # Анализируем результаты задачи скачивания видео
         video_has_error = isinstance(video_res, Exception)
         if video_has_error:
             logger.error(f"Задача скачивания видео завершилась исключением: {video_res}")
+            video_err_box["error"] = f"Исключение при скачивании видео: {video_res}"
 
-        # Проверяем, что видео успешно скачалось и физически существует
         video_result_path = None
-
-        if not video_has_error and os.path.exists(video_output_path):
+        if not video_has_error and video_res is True and os.path.exists(video_output_path) and os.path.getsize(video_output_path) > 0:
             video_result_path = os.path.abspath(video_output_path)
         else:
+            if os.path.exists(video_output_path) and os.path.getsize(video_output_path) == 0:
+                try:
+                    os.remove(video_output_path)
+                except Exception:
+                    pass
             logger.warning("Скачивание видео не завершилось успехом, извлечение аудио пропущено.")
 
-        # Анализируем результаты задачи получения текста
         artifacts_has_error = isinstance(artifacts_res, Exception)
         if artifacts_has_error:
             logger.error(f"Задача получения текста завершилась исключением: {artifacts_res}")
 
         text_paths = {"transcript": None, "summary": None}
         if not artifacts_has_error and artifacts_res:
-            text_paths = process_and_save_text_artifacts(artifacts_res, recording_key, artifacts_dir)
+            text_paths = process_and_save_text_artifacts(artifacts_res, recording_key, artifacts_dir, file_prefix=safe_prefix)
 
         logger.info("Обработка всех доступных материалов завершена!")
 
-        # Возвращаем полный набор путей, включая аудио
         return {
             "video": video_result_path,
+            "video_error": video_err_box.get("error"),
             "transcript": text_paths["transcript"],
             "summary": text_paths["summary"]
         }
 
     except Exception as e:
         logger.error(f"Ошибка выполнения download_all_artifacts_by_url: {e}", exc_info=True)
-        return {"video": None, "audio": None, "transcript": None, "summary": None}
+        return {"video": None, "video_error": str(e), "audio": None, "transcript": None, "summary": None}
 
 
 async def is_meet_available(record_url: str, api_key: str) -> dict:

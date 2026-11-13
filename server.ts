@@ -20,6 +20,11 @@ import {
   touchCuratorLoginInDB,
   getLectureTasks,
   getLectureTaskByUrl,
+  getBlockingLectureTaskByUrl,
+  getLectureTaskById,
+  requeueLectureTaskInDB,
+  getPendingLectureTasksFIFO,
+  resetInterruptedLectureTasksToPending,
   insertLectureTask,
   updateLectureTaskProgressInDB,
   getTeachersFromDB,
@@ -32,12 +37,25 @@ import {
   getPromptConfigFromDB,
   saveCriteriaConfigInDB,
   getCriteriaConfigFromDB,
+  getReportSettingsFromDB,
+  saveReportSettingsInDB,
+  DEFAULT_REPORT_SETTINGS,
   createLectureTasksBackup,
   hydrateLectureTasksFromBackup,
   purgeDatabaseToCleanState,
+  getUnreviewedKtalkRecordings,
+  getHiddenKtalkRecordings,
+  markKtalkRecordingStatus,
+  markKtalkRecordingSubmittedByUrl,
   CuratorRecord,
   LectureTaskRecord
 } from "./db";
+
+import {
+  syncKtalkRecordingsNow,
+  getKtalkSyncStatus,
+  startKtalkAutoSyncScheduler
+} from "./ktalk_sync";
 
 import { sendOTPEmail } from "./email_service";
 import { STANDARD_CRITERIA_LIST } from "./tasks_store";
@@ -47,6 +65,8 @@ async function startServer() {
   console.log("[Инициализация] Подключение к реляционной базе данных...");
   try {
     await initDatabase();
+    // Возвращаем в очередь FIFO задачи, прерванные прошлым перезапуском контейнера
+    await resetInterruptedLectureTasksToPending();
     // Фоновое регулярное сохранение бэкапа проверок лекций в data/ каждые 60 минут
     await createLectureTasksBackup();
     setInterval(() => {
@@ -103,8 +123,20 @@ async function startServer() {
     return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || "127.0.0.1";
   };
 
-  // Rate Limiter
+  // Rate Limiter с периодической очисткой просроченных записей
   const ipRequestCounts = new Map<string, { count: number; resetTime: number }>();
+  const rateLimitPruneTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [key, val] of ipRequestCounts.entries()) {
+      if (now > val.resetTime) {
+        ipRequestCounts.delete(key);
+      }
+    }
+  }, 5 * 60 * 1000);
+  if (typeof rateLimitPruneTimer.unref === "function") {
+    rateLimitPruneTimer.unref();
+  }
+
   const tokenRateLimiter = (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const ip = getClientIp(req);
     const now = Date.now();
@@ -225,7 +257,7 @@ async function startServer() {
       });
     }
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const code = crypto.randomInt(100000, 1000000).toString();
     const expiresAt = Date.now() + 5 * 60 * 1000; // 5 минут
 
     // Сохраняем OTP код в БД
@@ -345,37 +377,9 @@ async function startServer() {
 
     const existing = await getCuratorByEmail(normalizedEmail);
     if (existing) {
-      if (normalizedEmail === 'shurygin.egor2009@gmail.com') {
-        return res.status(400).json({ success: false, message: "Главный администратор shurygin.egor2009@gmail.com уже зарегистрирован в системе." });
-      }
-
-      // Если куратор уже существовал (или был ранее добавлен), обновляем его имя, роль и активируем
-      const updatedRecord: CuratorRecord = {
-        ...existing,
-        fullName: displayName,
-        role: assignedRole,
-        status: "active",
-        addedBy: currentUser.fullName || currentUser.email
-      };
-
-      const updated = await insertCurator(updatedRecord);
-      if (!updated) {
-        return res.status(500).json({ success: false, message: "Ошибка обновления данных куратора в базе данных." });
-      }
-
-      await logAuditEvent(
-        currentUser.email,
-        currentUser.role,
-        "CURATOR_UPDATED",
-        normalizedEmail,
-        `Куратор обновлен: ${displayName} (${normalizedEmail}) с ролью ${assignedRole}`,
-        ip
-      );
-
-      return res.json({
-        success: true,
-        message: `Куратор ${normalizedEmail} (${displayName}) успешно обновлен и активирован в белом списке.`,
-        curator: updatedRecord
+      return res.status(409).json({
+        success: false,
+        message: `Куратор с email ${normalizedEmail} уже зарегистрирован в белом списке (роль: ${existing.role === "senior_curator" ? "Старший куратор" : "Куратор"}, статус: ${existing.status === "blocked" ? "Заблокирован" : "Активен"}). Используйте элементы управления в таблице для смены роли или статуса.`
       });
     }
 
@@ -416,7 +420,8 @@ async function startServer() {
   app.delete("/api/curators/:email", requireAuth, requireSeniorCurator, async (req, res) => {
     const ip = getClientIp(req);
     const currentUser: CuratorRecord = (req as any).user;
-    const targetEmail = decodeURIComponent(req.params.email).toLowerCase().trim();
+    const rawEmail = Array.isArray(req.params.email) ? req.params.email[0] : req.params.email;
+    const targetEmail = decodeURIComponent(String(rawEmail || "")).toLowerCase().trim();
 
     if (targetEmail === currentUser.email.toLowerCase() || targetEmail === 'shurygin.egor2009@gmail.com') {
       return res.status(400).json({ success: false, message: "Нельзя удалить собственного пользователя или главного администратора." });
@@ -446,7 +451,8 @@ async function startServer() {
   app.patch("/api/curators/:email/role", requireAuth, requireSeniorCurator, async (req, res) => {
     const ip = getClientIp(req);
     const currentUser: CuratorRecord = (req as any).user;
-    const targetEmail = decodeURIComponent(req.params.email).toLowerCase().trim();
+    const rawEmail = Array.isArray(req.params.email) ? req.params.email[0] : req.params.email;
+    const targetEmail = decodeURIComponent(String(rawEmail || "")).toLowerCase().trim();
     const { role } = req.body;
 
     if (role !== "curator" && role !== "senior_curator") {
@@ -485,7 +491,8 @@ async function startServer() {
   app.patch("/api/curators/:email/status", requireAuth, requireSeniorCurator, async (req, res) => {
     const ip = getClientIp(req);
     const currentUser: CuratorRecord = (req as any).user;
-    const targetEmail = decodeURIComponent(req.params.email).toLowerCase().trim();
+    const rawEmail = Array.isArray(req.params.email) ? req.params.email[0] : req.params.email;
+    const targetEmail = decodeURIComponent(String(rawEmail || "")).toLowerCase().trim();
     const { status } = req.body;
 
     if (status !== "active" && status !== "blocked") {
@@ -520,34 +527,236 @@ async function startServer() {
   });
 
   // -------------------------------------------------------------
-  // 3. ОТПРАВКА ВСТРЕЧ КТАЛК И АНАЛИТИКА В БД
+  // 3. ОТПРАВКА ВСТРЕЧ КТАЛК И ОЧЕРЕДЬ FIFO ДЛЯ GIGACHAT
   // -------------------------------------------------------------
+  let isQueueProcessing = false;
+  let activeQueueTaskId: string | null = null;
+  let queueWakeupPending = false;
 
-  // Список всех проверок из БД
+  async function processLectureQueue(): Promise<void> {
+    if (isQueueProcessing) {
+      queueWakeupPending = true;
+      return;
+    }
+
+    isQueueProcessing = true;
+    try {
+      while (true) {
+        queueWakeupPending = false;
+        const pendingTasks = await getPendingLectureTasksFIFO();
+        if (pendingTasks.length === 0) {
+          if (!queueWakeupPending) break;
+          continue;
+        }
+
+        const nextTask = pendingTasks[0];
+        activeQueueTaskId = nextTask.id;
+        console.log(
+          `[Очередь FIFO] ▶️ Запуск задачи ${nextTask.id} (${nextTask.teacherName}). Ожидают в очереди: ${pendingTasks.length - 1}`
+        );
+
+        await runTaskPipelineInDB(
+          nextTask.id,
+          nextTask.lectureUrl,
+          nextTask.teacherName,
+          nextTask.subject,
+          nextTask.groupName,
+          nextTask.curatorEmail
+        );
+
+        activeQueueTaskId = null;
+      }
+    } catch (queueErr) {
+      console.error("[Очередь FIFO] Критическая ошибка диспетчера очереди:", queueErr);
+    } finally {
+      activeQueueTaskId = null;
+      isQueueProcessing = false;
+      if (queueWakeupPending) {
+        setImmediate(() => {
+          void processLectureQueue();
+        });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------
+  // 2.5 СИНХРОНИЗАЦИЯ НЕПРОВЕРЕННЫХ ВСТРЕЧ ИЗ КОНТУР.ТОЛК
+  // -------------------------------------------------------------
+  app.get("/api/ktalk/recordings", requireAuth, async (req, res) => {
+    try {
+      const recordings = await getUnreviewedKtalkRecordings();
+      res.json({
+        success: true,
+        recordings,
+        syncStatus: getKtalkSyncStatus()
+      });
+    } catch (err: any) {
+      console.error("[KTalk API] Ошибка получения непроверенных встреч:", err);
+      res.status(500).json({
+        success: false,
+        message: "Не удалось загрузить список непроверенных встреч Контур.Толк.",
+        syncStatus: getKtalkSyncStatus()
+      });
+    }
+  });
+
+  app.post("/api/ktalk/sync", requireAuth, async (req, res) => {
+    const ip = getClientIp(req);
+    const currentUser: CuratorRecord = (req as any).user;
+    try {
+      const syncRes = await syncKtalkRecordingsNow();
+      const recordings = await getUnreviewedKtalkRecordings();
+      await logAuditEvent(
+        currentUser.email,
+        currentUser.role,
+        "KTALK_MANUAL_SYNC",
+        "ktalk_recordings",
+        syncRes.success
+          ? `Ручное обновление встреч КТалк: получено ${syncRes.fetchedCount}, новых ${syncRes.addedCount}`
+          : `Ошибка синхронизации КТалк: ${syncRes.error}`,
+        ip
+      );
+      res.json({
+        success: syncRes.success,
+        error: syncRes.error,
+        addedCount: syncRes.addedCount,
+        fetchedCount: syncRes.fetchedCount,
+        recordings,
+        syncStatus: getKtalkSyncStatus()
+      });
+    } catch (err: any) {
+      console.error("[KTalk API] Ошибка ручной синхронизации:", err);
+      res.status(500).json({
+        success: false,
+        error: err?.message || "Ошибка синхронизации с Контур.Толк.",
+        addedCount: 0,
+        fetchedCount: 0,
+        recordings: await getUnreviewedKtalkRecordings(),
+        syncStatus: getKtalkSyncStatus()
+      });
+    }
+  });
+
+  app.post("/api/ktalk/recordings/:key/hide", requireAuth, async (req, res) => {
+    const ip = getClientIp(req);
+    const currentUser: CuratorRecord = (req as any).user;
+    const rawKey = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+    const key = decodeURIComponent(String(rawKey || "")).trim();
+
+    if (!key) {
+      return res.status(400).json({ success: false, message: "Не указан ключ записи Контур.Толк." });
+    }
+
+    const updated = await markKtalkRecordingStatus(key, "hidden", currentUser.email);
+    if (!updated) {
+      return res.status(404).json({ success: false, message: "Запись Контур.Толк не найдена." });
+    }
+
+    await logAuditEvent(
+      currentUser.email,
+      currentUser.role,
+      "KTALK_RECORDING_HIDDEN",
+      key,
+      `Запись встречи КТалк скрыта куратором как нецелевая («Скрыть / Не лекция»)`,
+      ip
+    );
+
+    res.json({ success: true, message: "Встреча скрыта из списка непроверенных." });
+  });
+
+  app.get("/api/ktalk/recordings/hidden", requireAuth, async (req, res) => {
+    try {
+      const recordings = await getHiddenKtalkRecordings();
+      res.json({ success: true, recordings });
+    } catch (err: any) {
+      console.error("[KTalk API] Ошибка получения скрытых встреч:", err);
+      res.status(500).json({
+        success: false,
+        message: "Не удалось загрузить скрытые записи Контур.Толк."
+      });
+    }
+  });
+
+  app.post("/api/ktalk/recordings/:key/restore", requireAuth, async (req, res) => {
+    const ip = getClientIp(req);
+    const currentUser: CuratorRecord = (req as any).user;
+    const rawKey = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+    const key = decodeURIComponent(String(rawKey || "")).trim();
+
+    if (!key) {
+      return res.status(400).json({ success: false, message: "Не указан ключ записи Контур.Толк." });
+    }
+
+    const updated = await markKtalkRecordingStatus(key, "new", currentUser.email);
+    if (!updated) {
+      return res.status(404).json({ success: false, message: "Запись Контур.Толк не найдена." });
+    }
+
+    await logAuditEvent(
+      currentUser.email,
+      currentUser.role,
+      "KTALK_RECORDING_RESTORED",
+      key,
+      `Запись встречи КТалк возвращена из скрытых в список непроверенных`,
+      ip
+    );
+
+    res.json({ success: true, message: "Встреча возвращена в список непроверенных." });
+  });
+
+  // Список всех проверок из БД с актуальной позицией в FIFO-очереди
   app.get("/api/tasks", requireAuth, async (req, res) => {
     const tasks = await getLectureTasks();
+    const pendingSorted = tasks
+      .filter(t => t.status === "pending")
+      .sort((a, b) => {
+        const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        return Number.isNaN(diff) || diff === 0 ? a.id.localeCompare(b.id) : diff;
+      });
+    const positionMap = new Map<string, number>();
+    pendingSorted.forEach((t, idx) => positionMap.set(t.id, idx + 1));
+
+    const enrichedTasks = tasks.map(t =>
+      t.status === "pending" ? { ...t, queuePosition: positionMap.get(t.id) || 1 } : t
+    );
+
     res.json({
       success: true,
-      tasks
+      tasks: enrichedTasks,
+      queueStats: {
+        isProcessing: isQueueProcessing,
+        activeTaskId: activeQueueTaskId,
+        queuedCount: pendingSorted.length
+      }
     });
   });
 
-  // Создание новой задачи проверки видеозаписи КТалк с сохранением в БД
+  // Создание новой задачи проверки видеозаписи КТалк с постановкой в FIFO-очередь
   app.post("/api/tasks", requireAuth, async (req, res) => {
     const ip = getClientIp(req);
     const currentUser: CuratorRecord = (req as any).user;
     const { lectureUrl, teacherName, subject, groupName } = req.body;
 
-    if (!lectureUrl || typeof lectureUrl !== "string") {
+    if (!lectureUrl || typeof lectureUrl !== "string" || !lectureUrl.trim()) {
       return res.status(400).json({ success: false, message: "Укажите ссылку на встречу КТалк." });
     }
 
-    if (!teacherName || typeof teacherName !== "string") {
+    const cleanTeacher = typeof teacherName === "string" ? teacherName.trim() : "";
+    const cleanSubject = typeof subject === "string" ? subject.trim() : "";
+    const cleanGroup = typeof groupName === "string" ? groupName.trim() : "";
+
+    if (!cleanTeacher) {
       return res.status(400).json({ success: false, message: "Выберите или введите ФИО преподавателя." });
+    }
+    if (!cleanSubject) {
+      return res.status(400).json({ success: false, message: "Укажите дисциплину / предмет." });
+    }
+    if (!cleanGroup) {
+      return res.status(400).json({ success: false, message: "Укажите группу / параллель." });
     }
 
     const cleanUrl = lectureUrl.trim();
-    const existingTask = await getLectureTaskByUrl(cleanUrl);
+    const existingTask = await getBlockingLectureTaskByUrl(cleanUrl);
     if (existingTask) {
       await logAuditEvent(
         currentUser.email,
@@ -557,81 +766,79 @@ async function startServer() {
         `Попытка повторной отправки встречи КТалк: ${cleanUrl} (Преподаватель: ${existingTask.teacherName})`,
         ip
       );
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
         code: "DUPLICATE_URL",
-        message: `Эта ссылка на занятие КТалк уже проверялась ранее (Преподаватель: ${existingTask.teacherName}, Дата: ${existingTask.date}).`,
+        message: `Эта ссылка на занятие КТалк уже находится в работе или успешно проверена ранее (Преподаватель: ${existingTask.teacherName}, Дата: ${existingTask.date}).`,
         existingTask
       });
     }
 
-    const taskId = `lec_${Date.now()}`;
-    const cleanTeacher = teacherName.trim();
-    const cleanSubject = (subject || "Олимпиадная подготовка").trim();
-    const cleanGroup = (groupName || "Основная группа").trim();
+    const taskId = `lec_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
-    const activeCriteriaConfig = await getCriteriaConfigFromDB("active");
-    const activeCriteriaList = (activeCriteriaConfig && Array.isArray(activeCriteriaConfig.standardCriteria) && activeCriteriaConfig.standardCriteria.length > 0)
-      ? activeCriteriaConfig.standardCriteria
-      : STANDARD_CRITERIA_LIST;
-
-    const initialCriteria = activeCriteriaList.map((c: any) => ({
-      id: c.id,
-      text: c.text,
-      category: c.category,
-      passed: true,
-      score: 5
-    }));
-    const maxPts = initialCriteria.length * 5;
-    const earned = initialCriteria.reduce((sum: number, c: any) => sum + c.score, 0);
-    const initialScore = maxPts > 0 ? Math.min(100, Math.max(0, Math.round((earned / maxPts) * 100))) : 100;
-
-    // Создаем запись задачи
+    // Кристальная честность: до завершения анализа в GigaChat никаких фейковых оценок и критериев!
     const newTask: LectureTaskRecord = {
       id: taskId,
-      lectureUrl: lectureUrl.trim(),
+      lectureUrl: cleanUrl,
       teacherName: cleanTeacher,
       subject: cleanSubject,
       groupName: cleanGroup,
       date: new Date().toISOString().replace("T", " ").slice(0, 16),
-      totalScore: initialScore,
+      totalScore: null,
       criticalViolations: [],
       positiveHighlights: [],
       recommendations: [],
-      criteria: initialCriteria,
-      status: "downloading",
-      progressPct: 15,
+      criteria: [],
+      status: "pending",
+      progressPct: 0,
       curatorEmail: currentUser.email,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      isCorrupted: false,
+      rawBrokenResponse: null,
+      errorMessage: null,
+      applicableCount: null,
+      earnedPoints: null,
+      maxPoints: null
     };
 
-    // Сохраняем задачу в БД
+    // Сохраняем задачу в БД (переживет рестарт сервера)
     await insertLectureTask(newTask);
+
+    // Помечаем запись КТалк как отправленную, чтобы она сразу исчезла из списка непроверенных
+    await markKtalkRecordingSubmittedByUrl(cleanUrl);
 
     // Добавляем преподавателя в каталог БД (если новый)
     await insertTeacherIfNotExists(cleanTeacher, cleanSubject);
 
-    // Записываем событие отправки в audit_logs БД
+    const pendingQueue = await getPendingLectureTasksFIFO();
+    const queueIdx = pendingQueue.findIndex(t => t.id === taskId);
+    const queuePosition = queueIdx >= 0 ? queueIdx + 1 : pendingQueue.length;
+    const startsImmediately = !isQueueProcessing && queuePosition === 1;
+
+    // Записываем событие постановки в очередь в audit_logs БД
     await logAuditEvent(
       currentUser.email,
       currentUser.role,
-      "KTALK_TASK_SUBMITTED",
+      "KTALK_TASK_QUEUED",
       taskId,
-      `Встреча отправлена на анализ ИИ: ${cleanTeacher} | ${cleanSubject} | URL: ${lectureUrl.trim()}`,
+      `Встреча поставлена в очередь FIFO (#${queuePosition}): ${cleanTeacher} | ${cleanSubject} | URL: ${cleanUrl}`,
       ip
     );
 
-    // Запускаем реальную обработку через Python (KTalk + GigaChat)
-    runTaskPipelineInDB(taskId, lectureUrl.trim(), cleanTeacher, cleanSubject, cleanGroup, currentUser.email);
+    // Пробуждаем FIFO-диспетчер очереди (строго 1 задача за раз)
+    void processLectureQueue();
 
     res.json({
       success: true,
-      message: "Заявка на анализ встречи успешно зарегистрирована. Сервер приступил к обработке через нейросеть GigaChat.",
-      task: newTask
+      message: startsImmediately
+        ? "Заявка зарегистрирована. Сервер немедленно приступил к обработке через GigaChat."
+        : `Заявка добавлена в очередь на проверку (позиция #${queuePosition}). Обработка начнется сразу после завершения текущей лекции.`,
+      queuePosition,
+      task: { ...newTask, queuePosition }
     });
   });
 
-  // Вспомогательная функция обработки задачи через Python конвейер (KTalk + GigaChat)
+  // Вспомогательная функция обработки одной задачи через Python конвейер (KTalk + GigaChat)
   function runTaskPipelineInDB(
     taskId: string,
     lectureUrl: string,
@@ -640,135 +847,354 @@ async function startServer() {
     groupName: string = '',
     curatorEmail: string = '',
     additionalInfo: string = ''
-  ) {
-    // 1. Устанавливаем статус скачивания
-    updateLectureTaskProgressInDB(taskId, "downloading", 25);
+  ): Promise<void> {
+    return new Promise<void>(async (resolve) => {
+      let settled = false;
+      let watchdogTimer: NodeJS.Timeout | null = null;
+      let timedOut = false;
 
-    // 2. Запускаем Python конвейер ktalk_gigachat_pipeline.py
-    const pyScript = path.join(process.cwd(), "ktalk_gigachat_pipeline.py");
-    const args = [
-      pyScript,
-      taskId,
-      lectureUrl,
-      teacherName,
-      subject,
-      groupName,
-      curatorEmail,
-      additionalInfo
-    ];
+      const clearWatchdog = () => {
+        if (watchdogTimer) {
+          clearTimeout(watchdogTimer);
+          watchdogTimer = null;
+        }
+      };
 
-    console.log(`[Python Pipeline] Запуск анализа через Python: ${taskId} (${teacherName})`);
+      const finish = () => {
+        clearWatchdog();
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
 
-    // Промежуточные статусы
-    setTimeout(() => {
-      updateLectureTaskProgressInDB(taskId, "extracting", 50);
-    }, 4000);
+      // 1. Устанавливаем реальный начальный этап (загрузка видео КТалк)
+      await updateLectureTaskProgressInDB(taskId, "downloading", 15);
 
-    setTimeout(() => {
-      updateLectureTaskProgressInDB(taskId, "analyzing", 75);
-    }, 9000);
+      // 2. Запускаем Python конвейер ktalk_gigachat_pipeline.py
+      const pyScript = path.join(process.cwd(), "ktalk_gigachat_pipeline.py");
+      const args = [
+        pyScript,
+        taskId,
+        lectureUrl,
+        teacherName,
+        subject,
+        groupName,
+        curatorEmail,
+        additionalInfo
+      ];
 
-    const child = spawn("python3", args, {
-      cwd: process.cwd(),
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
+      console.log(`[Python Pipeline] Запуск анализа через Python: ${taskId} (${teacherName})`);
 
-    let stdout = "";
-    let stderr = "";
+      const child = spawn("python3", args, {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
 
-    child.stdout?.on("data", (chunk) => {
-      stdout += chunk.toString("utf-8");
-    });
+      // Сторожевой таймер на 30 минут, чтобы зависший процесс не заблокировал FIFO-очередь навсегда
+      watchdogTimer = setTimeout(() => {
+        if (!settled) {
+          timedOut = true;
+          console.error(`[Python Pipeline] ⏱ Превышен таймаут 30 минут для задачи ${taskId}. Остановка процесса.`);
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        }
+      }, 30 * 60 * 1000);
 
-    child.stderr?.on("data", (chunk) => {
-      const txt = chunk.toString("utf-8");
-      stderr += txt;
-      process.stderr.write(`[Python Worker] ${txt}`);
-    });
+      let stdout = "";
+      let stderr = "";
+      let stderrLineBuf = "";
 
-    child.on("close", async (code) => {
-      console.log(`[Python Pipeline] Завершился с кодом ${code} для ${taskId}`);
-      try {
-        let parsedResult: any = null;
-        if (stdout.trim()) {
-          const lines = stdout.trim().split("\n");
-          for (let i = lines.length - 1; i >= 0; i--) {
-            const line = lines[i].trim();
-            if (line.startsWith("{") && line.endsWith("}")) {
-              try {
-                parsedResult = JSON.parse(line);
-                break;
-              } catch {}
+      const stageProgressMap: Record<string, { status: 'downloading' | 'extracting' | 'uploading' | 'analyzing'; pct: number }> = {
+        downloading: { status: "downloading", pct: 15 },
+        extracting: { status: "extracting", pct: 40 },
+        uploading: { status: "uploading", pct: 65 },
+        analyzing: { status: "analyzing", pct: 85 }
+      };
+
+      child.stdout?.on("data", (chunk) => {
+        stdout += chunk.toString("utf-8");
+      });
+
+      child.stderr?.on("data", (chunk) => {
+        const txt = chunk.toString("utf-8");
+        stderr += txt;
+        process.stderr.write(`[Python Worker] ${txt}`);
+
+        stderrLineBuf += txt;
+        const lines = stderrLineBuf.split(/\r?\n/);
+        stderrLineBuf = lines.pop() || "";
+        for (const line of lines) {
+          const match = line.match(/\[STAGE\]\s+(downloading|extracting|uploading|analyzing)\b/i);
+          if (match && !settled && !timedOut) {
+            const stageInfo = stageProgressMap[match[1].toLowerCase()];
+            if (stageInfo) {
+              void updateLectureTaskProgressInDB(taskId, stageInfo.status, stageInfo.pct);
             }
           }
         }
+      });
 
-        if (parsedResult && parsedResult.success && parsedResult.task) {
-          const t = parsedResult.task;
-          const actualTeacher = t.teacherName || teacherName;
-          const actualSubject = t.subject || subject;
-          if (actualTeacher && actualTeacher !== "Преподаватель") {
-            await insertTeacherIfNotExists(actualTeacher, actualSubject);
-          }
+      child.on("error", async (spawnErr) => {
+        clearWatchdog();
+        console.error(`[Python Pipeline] Не удалось запустить python3 для ${taskId}:`, spawnErr);
+        try {
+          const errMsg = "Не удалось запустить Python-обработчик на сервере.";
           await updateLectureTaskProgressInDB(
             taskId,
-            "completed",
+            "failed",
             100,
-            t.totalScore,
-            t.positiveHighlights,
-            t.recommendations,
-            t.criteria,
-            t.criticalViolations,
-            t.talkMetadata,
-            t.isCorrupted,
-            t.rawBrokenResponse,
-            actualTeacher,
-            actualSubject
-          );
-
-          await createLectureTasksBackup();
-          await logAuditEvent(
-            "ai_analyzer",
-            "system",
-            t.isCorrupted ? "TASK_ANALYSIS_CORRUPTED" : "TASK_ANALYSIS_COMPLETED",
-            taskId,
-            `Анализ встречи преподавателя ${actualTeacher} завершен через GigaChat (Python). Оценка: ${t.totalScore}%. Поврежден: ${Boolean(t.isCorrupted)}`,
-            "127.0.0.1"
-          );
-        } else {
-          console.error(`[Python Pipeline] Ошибка выполнения для ${taskId}:`, stderr);
-          const rawErr = stderr || "Неизвестная ошибка выполнения Python-воркера";
-          await updateLectureTaskProgressInDB(
-            taskId,
-            "completed",
-            100,
-            0,
+            null,
             [],
-            ["Не удалось получить валидный ответ нейросети. Ознакомьтесь с сырыми данными ошибки."],
             [],
-            ["Сбой конвейера анализа лекции"],
+            [],
+            [],
             null,
             true,
-            rawErr
+            String(spawnErr),
+            undefined,
+            undefined,
+            { errorMessage: errMsg, applicableCount: null, earnedPoints: null, maxPoints: null }
           );
           await createLectureTasksBackup();
+          await logAuditEvent("ai_analyzer", "system", "TASK_ANALYSIS_FAILED", taskId, `${errMsg} ${String(spawnErr)}`, "127.0.0.1");
+        } catch (err) {
+          console.error(`[Python Pipeline] Ошибка сохранения статуса failed для ${taskId}:`, err);
+        } finally {
+          finish();
         }
-      } catch (err) {
-        console.error(`[Python Pipeline] Исключение при обновлении задачи ${taskId}:`, err);
-        await updateLectureTaskProgressInDB(taskId, "failed", 100);
-      }
+      });
+
+      child.on("close", async (code) => {
+        clearWatchdog();
+        console.log(`[Python Pipeline] Завершился с кодом ${code} для ${taskId}`);
+        try {
+          if (timedOut) {
+            const timeoutErr = "Превышен лимит времени ожидания обработки (30 минут). Запись не была проанализирована — запустите повторную проверку.";
+            await updateLectureTaskProgressInDB(
+              taskId,
+              "failed",
+              100,
+              null,
+              [],
+              [],
+              [],
+              [],
+              null,
+              true,
+              stderr || stdout || timeoutErr,
+              undefined,
+              undefined,
+              { errorMessage: timeoutErr, applicableCount: null, earnedPoints: null, maxPoints: null }
+            );
+            await createLectureTasksBackup();
+            await logAuditEvent("ai_analyzer", "system", "TASK_ANALYSIS_TIMEOUT", taskId, timeoutErr, "127.0.0.1");
+            return;
+          }
+
+          let parsedResult: any = null;
+          if (stdout.trim()) {
+            const lines = stdout.trim().split("\n");
+            for (let i = lines.length - 1; i >= 0; i--) {
+              const line = lines[i].trim();
+              if (line.startsWith("{") && line.endsWith("}")) {
+                try {
+                  parsedResult = JSON.parse(line);
+                  break;
+                } catch {}
+              }
+            }
+          }
+
+          if (parsedResult && parsedResult.success && parsedResult.task) {
+            const t = parsedResult.task;
+            const actualTeacher = t.teacherName || teacherName;
+            const actualSubject = t.subject || subject;
+            if (actualTeacher && actualTeacher !== "Преподаватель") {
+              await insertTeacherIfNotExists(actualTeacher, actualSubject);
+            }
+
+            if (t.status === "failed") {
+              const failMsg = t.errorMessage || "Не удалось выполнить анализ лекции. Данные не оценивались.";
+              await updateLectureTaskProgressInDB(
+                taskId,
+                "failed",
+                100,
+                null,
+                [],
+                [],
+                [],
+                [],
+                t.talkMetadata || null,
+                Boolean(t.isCorrupted),
+                t.rawBrokenResponse || null,
+                actualTeacher,
+                actualSubject,
+                {
+                  errorMessage: failMsg,
+                  applicableCount: null,
+                  earnedPoints: null,
+                  maxPoints: null
+                }
+              );
+              await createLectureTasksBackup();
+              await logAuditEvent(
+                "ai_analyzer",
+                "system",
+                t.isCorrupted ? "TASK_ANALYSIS_CORRUPTED" : "TASK_ANALYSIS_FAILED",
+                taskId,
+                `Проверка встречи ${actualTeacher} не выполнена: ${failMsg}`,
+                "127.0.0.1"
+              );
+            } else {
+              await updateLectureTaskProgressInDB(
+                taskId,
+                "completed",
+                100,
+                typeof t.totalScore === "number" ? t.totalScore : null,
+                Array.isArray(t.positiveHighlights) ? t.positiveHighlights : [],
+                Array.isArray(t.recommendations) ? t.recommendations : [],
+                Array.isArray(t.criteria) ? t.criteria : [],
+                Array.isArray(t.criticalViolations) ? t.criticalViolations : [],
+                t.talkMetadata || null,
+                false,
+                null,
+                actualTeacher,
+                actualSubject,
+                {
+                  errorMessage: null,
+                  applicableCount: typeof t.applicableCount === "number" ? t.applicableCount : null,
+                  earnedPoints: typeof t.earnedPoints === "number" ? t.earnedPoints : null,
+                  maxPoints: typeof t.maxPoints === "number" ? t.maxPoints : null
+                }
+              );
+              await createLectureTasksBackup();
+              await logAuditEvent(
+                "ai_analyzer",
+                "system",
+                "TASK_ANALYSIS_COMPLETED",
+                taskId,
+                `Анализ встречи преподавателя ${actualTeacher} честно завершен через GigaChat. Оценка: ${t.totalScore}% (критериев: ${t.applicableCount ?? "?"})`,
+                "127.0.0.1"
+              );
+            }
+          } else {
+            console.error(`[Python Pipeline] Ошибка выполнения для ${taskId}:`, stderr);
+            const failMsg = "Конвейер анализа завершился со сбоем и не вернул результат от GigaChat.";
+            await updateLectureTaskProgressInDB(
+              taskId,
+              "failed",
+              100,
+              null,
+              [],
+              [],
+              [],
+              [],
+              null,
+              true,
+              stderr || stdout || failMsg,
+              undefined,
+              undefined,
+              { errorMessage: failMsg, applicableCount: null, earnedPoints: null, maxPoints: null }
+            );
+            await createLectureTasksBackup();
+            await logAuditEvent(
+              "ai_analyzer",
+              "system",
+              "TASK_ANALYSIS_FAILED",
+              taskId,
+              `${failMsg} (код выхода ${code})`,
+              "127.0.0.1"
+            );
+          }
+        } catch (err) {
+          console.error(`[Python Pipeline] Исключение при обновлении задачи ${taskId}:`, err);
+          await updateLectureTaskProgressInDB(
+            taskId,
+            "failed",
+            100,
+            null,
+            [],
+            [],
+            [],
+            [],
+            null,
+            true,
+            String(err),
+            undefined,
+            undefined,
+            { errorMessage: `Исключение при обработке результата: ${String(err)}` }
+          );
+          await createLectureTasksBackup();
+        } finally {
+          finish();
+        }
+      });
     });
   }
 
   // Статус конкретной задачи из БД
   app.get("/api/tasks/:id", requireAuth, async (req, res) => {
-    const tasks = await getLectureTasks();
-    const task = tasks.find(t => t.id === req.params.id);
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const task = await getLectureTaskById(String(rawId || ""));
     if (!task) {
       return res.status(404).json({ success: false, message: "Задача не найдена." });
     }
-    res.json({ success: true, task });
+    let queuePosition: number | undefined = undefined;
+    if (task.status === "pending") {
+      const pending = await getPendingLectureTasksFIFO();
+      const idx = pending.findIndex(t => t.id === task.id);
+      queuePosition = idx >= 0 ? idx + 1 : 1;
+    }
+    res.json({ success: true, task: queuePosition ? { ...task, queuePosition } : task });
+  });
+
+  // Повторная постановка сбойной или поврежденной лекции в очередь FIFO
+  app.post("/api/tasks/:id/retry", requireAuth, async (req, res) => {
+    const ip = getClientIp(req);
+    const currentUser: CuratorRecord = (req as any).user;
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const task = await getLectureTaskById(String(rawId || ""));
+
+    if (!task) {
+      return res.status(404).json({ success: false, message: "Задача проверки не найдена." });
+    }
+
+    if (task.status !== "failed" && !task.isCorrupted) {
+      return res.status(400).json({
+        success: false,
+        message: "Повторная проверка доступна только для сбойных или повреждённых задач."
+      });
+    }
+
+    const requeued = await requeueLectureTaskInDB(task.id);
+    if (!requeued) {
+      return res.status(500).json({ success: false, message: "Не удалось вернуть задачу в очередь." });
+    }
+
+    const pendingQueue = await getPendingLectureTasksFIFO();
+    const idx = pendingQueue.findIndex(t => t.id === task.id);
+    const queuePosition = idx >= 0 ? idx + 1 : pendingQueue.length;
+
+    await logAuditEvent(
+      currentUser.email,
+      currentUser.role,
+      "KTALK_TASK_RETRIED",
+      task.id,
+      `Запущена повторная проверка встречи (${task.teacherName}, позиция в очереди #${queuePosition})`,
+      ip
+    );
+
+    void processLectureQueue();
+
+    res.json({
+      success: true,
+      message: `Лекция возвращена в очередь FIFO на повторную проверку (позиция #${queuePosition}).`,
+      queuePosition,
+      task: { ...requeued, queuePosition }
+    });
   });
 
   // Список доступных преподавателей из БД
@@ -781,14 +1207,17 @@ async function startServer() {
   app.get("/api/analytics/export-excel", requireAuth, async (req, res) => {
     const ip = getClientIp(req);
     const currentUser: CuratorRecord = (req as any).user;
-    const tasks = (await getLectureTasks()).filter(t => t.status === "completed");
+    const tasks = (await getLectureTasks()).filter(
+      t => t.status === "completed" && !t.isCorrupted && typeof t.totalScore === "number"
+    );
 
     // Таблица 1: Сводка по преподавателям
     const teacherMap = new Map<string, { count: number; totalScore: number; criticalCount: number }>();
     tasks.forEach(t => {
+      const score = Number(t.totalScore);
       const cur = teacherMap.get(t.teacherName) || { count: 0, totalScore: 0, criticalCount: 0 };
       cur.count++;
-      cur.totalScore += t.totalScore;
+      cur.totalScore += score;
       if (t.criticalViolations && t.criticalViolations.length > 0) cur.criticalCount++;
       teacherMap.set(t.teacherName, cur);
     });
@@ -810,6 +1239,8 @@ async function startServer() {
       "Группа": t.groupName,
       "Ссылка на КТалк": t.lectureUrl,
       "Итоговый балл": t.totalScore,
+      "Применимо критериев": t.applicableCount ?? t.criteria.filter((c: any) => !c?.notApplicable && c?.score !== null).length,
+      "Критический статус": t.criticalViolations && t.criticalViolations.length > 0 ? "Критическое нарушение" : "Без критических нарушений",
       "Критические нарушения": t.criticalViolations.join("; ") || "Нет",
       "Сильные стороны": t.positiveHighlights.join("; ") || "Соответствует стандарту",
       "Рекомендации методиста": t.recommendations.join("; ") || "Замечаний нет",
@@ -927,6 +1358,7 @@ async function startServer() {
       const finalActive = activePrompt || DEFAULT_FACTORY_PROMPT;
       const finalBase = basePrompt || DEFAULT_FACTORY_PROMPT;
       const auditLogs = await getAuditLogs(30);
+      const reportSettings = await getReportSettingsFromDB();
 
       res.json({
         success: true,
@@ -934,6 +1366,7 @@ async function startServer() {
         base: finalBase,
         factory: DEFAULT_FACTORY_PROMPT,
         audit_logs: auditLogs,
+        reportSettings,
         has_unsaved_changes: false
       });
     } catch (err) {
@@ -944,13 +1377,14 @@ async function startServer() {
         base: DEFAULT_FACTORY_PROMPT,
         factory: DEFAULT_FACTORY_PROMPT,
         audit_logs: [],
+        reportSettings: { ...DEFAULT_REPORT_SETTINGS },
         has_unsaved_changes: false
       });
     }
   });
 
-  // Запрос кода подтверждения для сохранения промпта (на email старшего куратора)
-  app.post("/api/prompt/request-save-code", requireAuth, requireSeniorCurator, async (req, res) => {
+  // Запрос кода подтверждения для сохранения промпта и настроек отчета (на email старшего куратора)
+  app.post("/api/prompt/request-save-code", tokenRateLimiter, requireAuth, requireSeniorCurator, async (req, res) => {
     const ip = getClientIp(req);
     const user: CuratorRecord = (req as any).user;
     const action = req.body.action || "save_active";
@@ -958,12 +1392,13 @@ async function startServer() {
     const actionTitles: Record<string, string> = {
       save_active: "Сохранение рабочего системного промпта нейросети",
       save_base: "Фиксация нового базового эталона промпта",
-      reset_to_base: "Сброс к сохраненному базовому эталону",
-      reset_to_factory: "Сброс к заводскому промпту разработчика"
+      reset_to_base: "Сброс рабочего промпта к сохраненному базовому эталону",
+      reset_to_factory: "Сброс рабочего промпта к заводскому промпту разработчика",
+      save_report_settings: "Обновление настроек отображения оценок и неприменимых критериев (Н/П) в отчетах"
     };
     const actionDesc = actionTitles[action] || "Изменение системного промпта ИИ";
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const code = crypto.randomInt(100000, 1000000).toString();
     const expiresAt = Date.now() + 5 * 60 * 1000;
 
     // Сохраняем OTP в БД
@@ -989,11 +1424,11 @@ async function startServer() {
     });
   });
 
-  // Подтверждение сохранения промпта
-  app.post("/api/prompt/confirm-save", requireAuth, requireSeniorCurator, async (req, res) => {
+  // Подтверждение сохранения промпта / сброса / настроек отчета
+  app.post("/api/prompt/confirm-save", tokenRateLimiter, requireAuth, requireSeniorCurator, async (req, res) => {
     const ip = getClientIp(req);
     const user: CuratorRecord = (req as any).user;
-    const { code, action, prompt_text } = req.body;
+    const { code, action, prompt_text, reportSettings: incomingReportSettings } = req.body;
 
     const verification = await verifyOTPFromDB(user.email, code || "", "prompt_save");
     if (!verification.valid) {
@@ -1001,47 +1436,66 @@ async function startServer() {
       return res.status(400).json({ success: false, message: verification.message });
     }
 
-    // Сохраняем в prompt_configs таблицу в БД
-    if (prompt_text) {
-      await savePromptConfigInDB(action === "save_base" ? "base" : "active", prompt_text, user.email);
-    }
+    let finalPromptToSave: string | undefined = typeof prompt_text === "string" && prompt_text.trim() ? prompt_text : undefined;
+    const dataDir = path.join(process.cwd(), "data");
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
-    // Сохраняем на диск в data/prompt_active.txt
-    try {
-      const dataDir = path.join(process.cwd(), "data");
-      if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-      const promptFile = path.join(dataDir, action === "save_base" ? "prompt_base.txt" : "prompt_active.txt");
-      if (prompt_text) {
-        fs.writeFileSync(promptFile, prompt_text, "utf-8");
+    if (action === "reset_to_base") {
+      let baseText = await getPromptConfigFromDB("base");
+      if (!baseText) {
+        const basePath = path.join(dataDir, "prompt_base.txt");
+        if (fs.existsSync(basePath)) baseText = fs.readFileSync(basePath, "utf-8").trim();
       }
-    } catch (saveErr) {
-      console.warn("Предупреждение сохранения файла промпта на диск:", saveErr);
+      finalPromptToSave = baseText || DEFAULT_FACTORY_PROMPT;
+    } else if (action === "reset_to_factory") {
+      finalPromptToSave = DEFAULT_FACTORY_PROMPT;
     }
 
-    // Записываем в журнал аудита БД
+    const targetPromptKey = action === "save_base" ? "base" : "active";
+
+    if (finalPromptToSave && action !== "save_report_settings") {
+      await savePromptConfigInDB(targetPromptKey, finalPromptToSave, user.email);
+      try {
+        const promptFile = path.join(dataDir, targetPromptKey === "base" ? "prompt_base.txt" : "prompt_active.txt");
+        fs.writeFileSync(promptFile, finalPromptToSave, "utf-8");
+      } catch (saveErr) {
+        console.warn("Предупреждение сохранения файла промпта на диск:", saveErr);
+      }
+
+      try {
+        const child = execFile("python3", ["prompt_manager.py", "confirm_save", user.email, "DIRECT_VERIFIED", action || "save_active", ip], { encoding: "utf-8" }, () => {});
+        child.stdin?.write(finalPromptToSave);
+        child.stdin?.end();
+      } catch {}
+    }
+
+    let savedReportSettings = await getReportSettingsFromDB();
+    if (incomingReportSettings && typeof incomingReportSettings === "object") {
+      savedReportSettings = await saveReportSettingsInDB(incomingReportSettings, user.email);
+    }
+
+    const successMsg = action === "save_report_settings"
+      ? "Настройки отображения критериев и Н/П в отчётах успешно обновлены!"
+      : action === "reset_to_base"
+      ? "Рабочий промпт успешно сброшен к сохранённому базовому эталону."
+      : action === "reset_to_factory"
+      ? "Рабочий промпт успешно сброшен к заводской версии."
+      : "Системный промпт нейросети успешно обновлен старшим куратором и зафиксирован в БД!";
+
     await logAuditEvent(
       user.email,
       user.role,
       "PROMPT_SAVE_CONFIRMED",
       action || "save_active",
-      `Системный промпт ИИ успешно обновлен и зафиксирован в БД старшим куратором ${user.fullName}`,
+      `${successMsg} (${user.fullName || user.email})`,
       ip
     );
 
-    // Уведомляем prompt_manager Python
-    try {
-      const child = execFile("python3", ["prompt_manager.py", "confirm_save", user.email, "DIRECT_VERIFIED", action || "save_active", ip], { encoding: "utf-8" }, () => {});
-      if (prompt_text) {
-        child.stdin?.write(prompt_text);
-        child.stdin?.end();
-      }
-    } catch (pyErr) {
-      // Игнорируем внешние ошибки python
-    }
-
     res.json({
       success: true,
-      message: "Системный промпт нейросети успешно обновлен старшим куратором и зафиксирован в БД!"
+      message: successMsg,
+      promptText: finalPromptToSave || null,
+      reportSettings: savedReportSettings
     });
   });
 
@@ -1061,6 +1515,7 @@ async function startServer() {
   ];
 
   app.get("/api/criteria/config", requireAuth, async (req, res) => {
+    const reportSettings = await getReportSettingsFromDB();
     try {
       const savedConfig = await getCriteriaConfigFromDB("active");
       if (savedConfig && Array.isArray(savedConfig.standardCriteria) && Array.isArray(savedConfig.criticalCriteria)) {
@@ -1068,6 +1523,7 @@ async function startServer() {
           success: true,
           standardCriteria: savedConfig.standardCriteria,
           criticalCriteria: savedConfig.criticalCriteria,
+          reportSettings,
           updatedAt: savedConfig.updatedAt || null,
           updatedBy: savedConfig.updatedBy || null
         });
@@ -1076,6 +1532,7 @@ async function startServer() {
         success: true,
         standardCriteria: STANDARD_CRITERIA_LIST,
         criticalCriteria: DEFAULT_CRITICAL_CRITERIA_LIST,
+        reportSettings,
         updatedAt: null,
         updatedBy: null
       });
@@ -1085,6 +1542,7 @@ async function startServer() {
         success: true,
         standardCriteria: STANDARD_CRITERIA_LIST,
         criticalCriteria: DEFAULT_CRITICAL_CRITERIA_LIST,
+        reportSettings,
         updatedAt: null,
         updatedBy: null
       });
@@ -1092,13 +1550,13 @@ async function startServer() {
   });
 
   // Запрос 2FA-кода на почту Senior Curator для сохранения критериев
-  app.post("/api/criteria/request-save-code", requireAuth, requireSeniorCurator, async (req, res) => {
+  app.post("/api/criteria/request-save-code", tokenRateLimiter, requireAuth, requireSeniorCurator, async (req, res) => {
     const ip = getClientIp(req);
     const user: CuratorRecord = (req as any).user;
     const { standardCount, criticalCount } = req.body;
 
     const actionDesc = `Сохранение изменений критериев оценки (${standardCount || 0} стандартных, ${criticalCount || 0} критических)`;
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const code = crypto.randomInt(100000, 1000000).toString();
     const expiresAt = Date.now() + 5 * 60 * 1000;
 
     await storeOTPInDB(user.email, code, "criteria_save", expiresAt);
@@ -1122,8 +1580,8 @@ async function startServer() {
     });
   });
 
-  // Подтверждение и сохранение критериев
-  app.post("/api/criteria/confirm-save", requireAuth, requireSeniorCurator, async (req, res) => {
+  // Подтверждение и сохранение критериев (с принудительной перенумерацией без дыр 1..N)
+  app.post("/api/criteria/confirm-save", tokenRateLimiter, requireAuth, requireSeniorCurator, async (req, res) => {
     const ip = getClientIp(req);
     const user: CuratorRecord = (req as any).user;
     const { code, standardCriteria, criticalCriteria } = req.body;
@@ -1138,9 +1596,29 @@ async function startServer() {
       return res.status(400).json({ success: false, message: verification.message });
     }
 
+    const normalizedStandard = standardCriteria
+      .filter((c: any) => c && typeof c.text === "string" && c.text.trim())
+      .map((c: any, idx: number) => ({
+        id: idx + 1,
+        text: c.text.trim(),
+        category: (typeof c.category === "string" && c.category.trim()) ? c.category.trim() : "Общее"
+      }));
+
+    if (normalizedStandard.length === 0) {
+      return res.status(400).json({ success: false, message: "В списке должен оставаться хотя бы один стандартный критерий." });
+    }
+
+    const normalizedCritical = criticalCriteria
+      .filter((c: any) => c && typeof c.title === "string" && c.title.trim())
+      .map((c: any, idx: number) => ({
+        id: idx + 1,
+        title: c.title.trim(),
+        desc: (typeof c.desc === "string" ? c.desc.trim() : "")
+      }));
+
     const criteriaData = {
-      standardCriteria,
-      criticalCriteria,
+      standardCriteria: normalizedStandard,
+      criticalCriteria: normalizedCritical,
       updatedAt: new Date().toISOString(),
       updatedBy: user.email
     };
@@ -1160,13 +1638,15 @@ async function startServer() {
       user.role,
       "CRITERIA_UPDATED_CONFIRMED",
       "criteria_config",
-      `Критерии оценки успешно обновлены старшим куратором ${user.fullName} (${standardCriteria.length} стандартных, ${criticalCriteria.length} критических)`,
+      `Критерии оценки успешно обновлены старшим куратором ${user.fullName} (${normalizedStandard.length} стандартных, ${normalizedCritical.length} критических, нумерация 1..N без пропусков)`,
       ip
     );
 
     res.json({
       success: true,
-      message: `Критерии оценки успешно обновлены и зафиксированы в базе данных! (${standardCriteria.length} стандартных, ${criticalCriteria.length} критических)`
+      standardCriteria: normalizedStandard,
+      criticalCriteria: normalizedCritical,
+      message: `Критерии оценки успешно обновлены и зафиксированы в базе данных! (${normalizedStandard.length} стандартных, ${normalizedCritical.length} критических)`
     });
   });
 
@@ -1217,6 +1697,12 @@ async function startServer() {
     console.log(`🗄️ База данных: PostgreSQL 16 / SQLite Fallback`);
     console.log(`📧 Начальный старший куратор: shurygin.egor2009@gmail.com`);
     console.log(`=============================================================\n`);
+
+    // Запускаем обработку сохраненной в БД очереди FIFO при старте сервера
+    void processLectureQueue();
+
+    // Запускаем фоновую авто-синхронизацию записей Контур.Толк (каждые 5 минут)
+    startKtalkAutoSyncScheduler();
   });
 }
 

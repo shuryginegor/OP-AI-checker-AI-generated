@@ -220,7 +220,22 @@ async def _execute_gigachat_task(bot, job_name: str, client: GigaChat, chat_payl
     t_start = time.time()
     logger.info(f"[GigaChat [{job_name}] DB_ID={db_id}] Старт отправки запроса к модели {chat_payload.model} (Вложений: {len(uploaded_file_ids)})...")
     try:
-        response = await client.achat(chat_payload)
+        max_retries = 5
+        response = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = await client.achat(chat_payload)
+                break
+            except Exception as attempt_err:
+                err_str = str(attempt_err)
+                is_rate_limit = "429" in err_str or "Too Many Requests" in err_str or "RateLimit" in type(attempt_err).__name__
+                if is_rate_limit and attempt < max_retries:
+                    wait_time = attempt * 7
+                    logger.warning(f"[GigaChat [{job_name}]] Получен 429 (RateLimit). Повтор {attempt}/{max_retries} через {wait_time} сек...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise attempt_err
+
         gen_time = time.time() - t_start
         logger.info(f"[GigaChat [{job_name}]] Ответ успешно получен за {gen_time:.2f} сек!")
 
@@ -346,10 +361,10 @@ def _calculate_dynamic_frame_limit(
     return target_frames
 
 
-async def process(artifacts: dict, additional_info: str = "", bot=None, tg_id: int = None, db_id: int = None) -> str:
+async def process(artifacts: dict, additional_info: str = "", bot=None, tg_id: int = None, db_id: int = None, await_completion: bool = False) -> str:
     """
     Подготавливает медиа и текстовые артефакты, формирует запрос для GigaChat
-    и запускает асинхронную обработку.
+    и запускает асинхронную (или последовательную при await_completion=True) обработку.
     """
     credentials = os.getenv("GIGACHAT_CREDENTIALS")
     if not credentials:
@@ -365,113 +380,144 @@ async def process(artifacts: dict, additional_info: str = "", bot=None, tg_id: i
 
     logger.debug(f"[GigaChat Process] Начинаем подготовку артефактов для DB_ID={db_id}...")
 
-    # Извлекаем аудио и кадры
-    audio_path, image_paths = await file_processing.extract_media_async(video_path)
+    audio_path = None
+    image_paths: List[Tuple[int, str]] = []
+    client: Optional[GigaChat] = None
+    uploaded_file_ids: List[str] = []
+    task_dispatched = False
 
-    transcript_text = ""
-    summary_text = ""
-    if artifacts.get("transcript") and os.path.exists(artifacts["transcript"]):
-        with open(artifacts["transcript"], "r", encoding="utf-8") as f:
-            transcript_text = f.read()
-        logger.debug(f"[GigaChat Process] Загружен транскрипт ({len(transcript_text)} символов)")
+    try:
+        # Извлекаем аудио и кадры
+        audio_path, image_paths = await file_processing.extract_media_async(video_path)
 
-    if artifacts.get("summary") and os.path.exists(artifacts["summary"]):
-        with open(artifacts["summary"], "r", encoding="utf-8") as f:
-            summary_text = f.read()
-        logger.debug(f"[GigaChat Process] Загружено саммари ({len(summary_text)} символов)")
+        transcript_text = ""
+        summary_text = ""
+        if artifacts.get("transcript") and os.path.exists(artifacts["transcript"]):
+            with open(artifacts["transcript"], "r", encoding="utf-8") as f:
+                transcript_text = f.read()
+            logger.debug(f"[GigaChat Process] Загружен транскрипт ({len(transcript_text)} символов)")
 
-    system_prompt = criteria.build_system_prompt(additional_info)
-    logger.debug(f"[GigaChat Process] Системный промпт сформирован ({len(system_prompt)} символов)")
+        if artifacts.get("summary") and os.path.exists(artifacts["summary"]):
+            with open(artifacts["summary"], "r", encoding="utf-8") as f:
+                summary_text = f.read()
+            logger.debug(f"[GigaChat Process] Загружено саммари ({len(summary_text)} символов)")
 
-    # Рассчитываем адаптивный лимит кадров под токен-бюджет
-    max_frames = _calculate_dynamic_frame_limit(transcript_text, summary_text, len(system_prompt), audio_path)
+        std_criteria_list, _ = criteria.get_dynamic_criteria()
+        criteria_count = len(std_criteria_list)
+        system_prompt = criteria.build_system_prompt(additional_info)
+        logger.debug(f"[GigaChat Process] Системный промпт сформирован ({len(system_prompt)} символов, критериев: {criteria_count})")
 
-    # Инициализация GigaChat клиента
-    client = get_gigachat_client()
-    model_name = os.getenv("GIGACHAT_MODEL", "GigaChat-2-Pro")
+        # Рассчитываем адаптивный лимит кадров под токен-бюджет
+        max_frames = _calculate_dynamic_frame_limit(transcript_text, summary_text, len(system_prompt), audio_path)
 
-    # Загружаем аудиодорожку и кадры в хранилище файлов GigaChat
-    logger.info(f"Загрузка аудиодорожки и до {max_frames} кадров в хранилище GigaChat...")
-    audio_file_id, uploaded_frames_data = await _upload_files_to_gigachat(client, audio_path, image_paths, max_frames=max_frames)
-    
-    uploaded_file_ids = []
-    if audio_file_id:
-        uploaded_file_ids.append(audio_file_id)
-    uploaded_file_ids.extend([fid for _, fid, _ in uploaded_frames_data])
+        # Инициализация GigaChat клиента
+        client = get_gigachat_client()
+        model_name = os.getenv("GIGACHAT_MODEL", "GigaChat-2-Pro")
 
-    # Формируем структуру сообщений
-    messages: List[Messages] = []
+        # Загружаем аудиодорожку и кадры в хранилище файлов GigaChat
+        logger.info(f"Загрузка аудиодорожки и до {max_frames} кадров в хранилище GigaChat...")
+        audio_file_id, uploaded_frames_data = await _upload_files_to_gigachat(client, audio_path, image_paths, max_frames=max_frames)
 
-    # 1. Системное сообщение с критериями и правилами оценивания
-    messages.append(
-        Messages(
-            role=MessagesRole.SYSTEM,
-            content=system_prompt
-        )
-    )
+        if audio_file_id:
+            uploaded_file_ids.append(audio_file_id)
+        uploaded_file_ids.extend([fid for _, fid, _ in uploaded_frames_data])
 
-    # 2. Пользовательское сообщение с аудио, транскриптом, саммари, прикрепленными кадрами и JSON-инструкцией
-    audio_desc = f"- Полная оригинальная аудиодорожка встречи прикреплена (ID файла: {audio_file_id})\n" if audio_file_id else "- Аудиодорожка не была извлечена.\n"
-    frames_description = "\n".join([f"- Кадр [{t_str}] (ID файла: {fid})" for t_str, fid, _ in uploaded_frames_data])
-    if not frames_description:
-        frames_description = "Кадры видео отсутствуют."
+        # Формируем структуру сообщений
+        messages: List[Messages] = [
+            Messages(
+                role=MessagesRole.SYSTEM,
+                content=system_prompt
+            )
+        ]
 
-    user_text = (
-        "--- МУЛЬТИМОДАЛЬНЫЕ МАТЕРИАЛЫ ВСТРЕЧИ ---\n"
-        f"ОСНОВНОЙ МАТЕРИАЛ (АУДИО):\n{audio_desc}\n"
-        "ВАЖНОЕ ПРИМЕЧАНИЕ О КАДРАХ ВИДЕОЗАПИСИ:\n"
-        "Прикреплены ключевые репрезентативные кадры экрана с указанием точного времени (слайды, окна, доска).\n"
-        f"Список прикрепленных кадров:\n{frames_description}\n\n"
-        f"--- ДОПОЛНИТЕЛЬНЫЙ ТЕКСТОВЫЙ МАТЕРИАЛ (ТРАНСКРИПТ И САММАРИ) ---\n"
-        f"ИИ-Краткий пересказ встречи:\n{summary_text if summary_text else 'Отсутствует'}\n\n"
-        f"Транскрипт общения с таймкодами реплик:\n{transcript_text if transcript_text else 'Отсутствует'}\n\n"
-        "ИНСТРУКЦИЯ ПО АНАЛИЗУ:\n"
-        "1. Внимательно сопоставь реплики из транскрипта и события в аудио/на кадрах с критериями оценивания.\n"
-        "2. Найди ВСЕ моменты панибратства, флуда, задержек при поиске файлов, посторонних звуков/людей на фоне, игнорирования учеников, срыва ДЗ.\n"
-        "3. Выстави строгие штрафные баллы в `criteria_scores` и укажи точные таймкоды нарушений в `comment` и `details`.\n\n"
-        "СТРОГОЕ ТРЕБОВАНИЕ К ФОРМАТУ:\n"
-        "Твой ответ должен состоять ИСКЛЮЧИТЕЛЬНО из валидного JSON-объекта (начинается с { и заканчивается на }). "
-        "Обязательно включи массив 'criteria_scores' с детальной оценкой по каждому из 21 критериев.\n\n"
-        f"{ai_common.JSON_OUTPUT_PROMPT_INSTRUCTIONS}"
-    )
+        audio_desc = f"- Полная оригинальная аудиодорожка встречи прикреплена (ID файла: {audio_file_id})\n" if audio_file_id else "- Аудиодорожка не была извлечена.\n"
+        frames_description = "\n".join([f"- Кадр [{t_str}] (ID файла: {fid})" for t_str, fid, _ in uploaded_frames_data])
+        if not frames_description:
+            frames_description = "Кадры видео отсутствуют."
 
-    messages.append(
-        Messages(
-            role=MessagesRole.USER,
-            content=user_text,
-            attachments=uploaded_file_ids if uploaded_file_ids else None
-        )
-    )
-
-    logger.debug(f"[GigaChat Payload] system_len={len(system_prompt)}, user_len={len(user_text)}, attachments_count={len(uploaded_file_ids)}")
-
-    chat_payload = Chat(
-        model=model_name,
-        messages=messages,
-        max_tokens=8192,
-        temperature=0.1
-    )
-
-    job_name = f"gigachat_{uuid.uuid4().hex[:12]}"
-
-    # Удаляем локальные временные медиа-файлы с диска для соблюдения 152-ФЗ
-    await file_processing.delete_files([
-        audio_path,
-        artifacts.get("audio"),
-        artifacts.get("video"),
-        artifacts.get("transcript"),
-        artifacts.get("summary"),
-        *[p for _, p in image_paths]
-    ])
-
-    # Запускаем прямую фоновую асинхронную задачу
-    if bot and tg_id and db_id:
-        asyncio.create_task(
-            _execute_gigachat_task(bot, job_name, client, chat_payload, uploaded_file_ids, tg_id, db_id, frames_count=len(uploaded_frames_data))
+        user_text = (
+            "--- МУЛЬТИМОДАЛЬНЫЕ МАТЕРИАЛЫ ВСТРЕЧИ ---\n"
+            f"ОСНОВНОЙ МАТЕРИАЛ (АУДИО):\n{audio_desc}\n"
+            "ВАЖНОЕ ПРИМЕЧАНИЕ О КАДРАХ ВИДЕОЗАПИСИ:\n"
+            "Прикреплены ключевые репрезентативные кадры экрана с указанием точного времени (слайды, окна, доска).\n"
+            f"Список прикрепленных кадров:\n{frames_description}\n\n"
+            f"--- ДОПОЛНИТЕЛЬНЫЙ ТЕКСТОВЫЙ МАТЕРИАЛ (ТРАНСКРИПТ И САММАРИ) ---\n"
+            f"ИИ-Краткий пересказ встречи:\n{summary_text if summary_text else 'Отсутствует'}\n\n"
+            f"Транскрипт общения с таймкодами реплик:\n{transcript_text if transcript_text else 'Отсутствует'}\n\n"
+            "ИНСТРУКЦИЯ ПО АНАЛИЗУ:\n"
+            "1. Внимательно сопоставь реплики из транскрипта и события в аудио/на кадрах с критериями оценивания.\n"
+            "2. Найди ВСЕ моменты панибратства, флуда, задержек при поиске файлов, посторонних звуков/людей на фоне, игнорирования учеников, срыва ДЗ.\n"
+            "3. Выстави строгие штрафные баллы в `criteria_scores` и укажи точные таймкоды нарушений в `comment` и `details`.\n\n"
+            "СТРОГОЕ ТРЕБОВАНИЕ К ФОРМАТУ:\n"
+            "Твой ответ должен состоять ИСКЛЮЧИТЕЛЬНО из валидного JSON-объекта (начинается с { и заканчивается на }). "
+            f"Обязательно включи массив 'criteria_scores' с детальной оценкой по каждому из {criteria_count} критериев.\n\n"
+            f"{ai_common.get_json_output_prompt_instructions()}"
         )
 
-    logger.info(f"GigaChat задача инициализирована: {job_name}")
-    return job_name
+        messages.append(
+            Messages(
+                role=MessagesRole.USER,
+                content=user_text,
+                attachments=uploaded_file_ids if uploaded_file_ids else None
+            )
+        )
+
+        logger.debug(f"[GigaChat Payload] system_len={len(system_prompt)}, user_len={len(user_text)}, attachments_count={len(uploaded_file_ids)}")
+
+        chat_payload = Chat(
+            model=model_name,
+            messages=messages,
+            max_tokens=8192,
+            temperature=0.1
+        )
+
+        job_name = f"gigachat_{uuid.uuid4().hex[:12]}"
+
+        # Удаляем локальные временные медиа-файлы с диска сразу после загрузки в облако GigaChat (152-ФЗ)
+        await file_processing.delete_files([
+            audio_path,
+            artifacts.get("audio"),
+            artifacts.get("video"),
+            artifacts.get("transcript"),
+            artifacts.get("summary"),
+            *[p for _, p in image_paths]
+        ])
+
+        if bot and tg_id and db_id:
+            if await_completion:
+                task_dispatched = True
+                await _execute_gigachat_task(
+                    bot, job_name, client, chat_payload, uploaded_file_ids, tg_id, db_id,
+                    frames_count=len(uploaded_frames_data)
+                )
+            else:
+                task_dispatched = True
+                asyncio.create_task(
+                    _execute_gigachat_task(
+                        bot, job_name, client, chat_payload, uploaded_file_ids, tg_id, db_id,
+                        frames_count=len(uploaded_frames_data)
+                    )
+                )
+
+        logger.info(f"GigaChat задача инициализирована: {job_name}")
+        return job_name
+    finally:
+        # Гарантированная очистка локальных файлов даже при сбое до запуска фоновой задачи
+        await file_processing.delete_files([
+            audio_path,
+            artifacts.get("audio"),
+            artifacts.get("video"),
+            artifacts.get("transcript"),
+            artifacts.get("summary"),
+            *[p for _, p in image_paths]
+        ])
+        if not task_dispatched and client is not None:
+            if uploaded_file_ids:
+                await _cleanup_gigachat_files(client, uploaded_file_ids)
+            try:
+                await client.aclose()
+            except Exception:
+                pass
 
 
 async def check_batch_jobs_loop(bot):

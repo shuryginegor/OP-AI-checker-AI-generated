@@ -36,24 +36,31 @@ function getTransporter() {
 export async function sendOTPEmail(
   toEmail: string,
   code: string,
-  purpose: 'login' | 'prompt_save' = 'login',
+  purpose: 'login' | 'prompt_save' | 'criteria_save' = 'login',
   actionDetails?: string
 ): Promise<SendEmailResult> {
   const transporter = getTransporter();
   const fromAddress = process.env.SMTP_FROM || process.env.SMTP_USER || '"Олимпиадные Практики" <auth@olympiadpractices.ru>';
 
   const isLogin = purpose === 'login';
+  const isCriteria = purpose === 'criteria_save';
   const subject = isLogin
     ? 'Код авторизации в личный кабинет «Олимпиадные Практики»'
-    : 'Код подтверждения изменения промпта ИИ «Олимпиадные Практики»';
+    : isCriteria
+      ? 'Код подтверждения изменения критериев оценки «Олимпиадные Практики»'
+      : 'Код подтверждения изменения промпта ИИ «Олимпиадные Практики»';
 
   const title = isLogin
     ? 'Вход в личный кабинет куратора'
-    : '2FA-подтверждение изменения промпта нейросети';
+    : isCriteria
+      ? '2FA-подтверждение изменения критериев оценки'
+      : '2FA-подтверждение изменения промпта нейросети';
 
   const subtitle = isLogin
     ? 'Вы запросили одноразовый код для входа в единый портал методического контроля вебинаров КТалк.'
-    : `Вы запросили подтверждение операции: ${actionDetails || 'Сохранение системного промпта нейросети GigaChat-2-Pro'}.`;
+    : isCriteria
+      ? `Вы запросили подтверждение операции: ${actionDetails || 'Обновление критериев методической оценки занятий'}.`
+      : `Вы запросили подтверждение операции: ${actionDetails || 'Сохранение системного промпта нейросети GigaChat-2-Pro'}.`;
 
   const htmlContent = `
 <!DOCTYPE html>

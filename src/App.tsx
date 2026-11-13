@@ -36,10 +36,16 @@ import {
   Sliders,
   Lock,
   ArrowRight,
-  Trash2
+  Trash2,
+  RefreshCw,
+  EyeOff,
+  Calendar,
+  User,
+  Link2,
+  Ban,
+  CheckCircle
 } from 'lucide-react';
-import * as XLSX from 'xlsx';
-import { PromptEditor } from './components/PromptEditor';
+import { PromptEditor, ReportDisplaySettings } from './components/PromptEditor';
 import { CriteriaManager } from './components/CriteriaManager';
 
 // Official Brand Logo component for "Олимпиадные Практики" (olympiadpractices.ru)
@@ -157,12 +163,58 @@ interface CuratorUser {
   createdAt?: string;
 }
 
+interface KtalkRecordingItem {
+  recordingKey: string;
+  lectureUrl: string;
+  title: string;
+  createdDate: string;
+  duration: string;
+  authorName: string;
+  authorLogin: string;
+  authorEmail: string;
+  roomName: string;
+  resolutions: string[];
+  hasTranscript?: boolean;
+  hasSummary?: boolean;
+  status: 'new' | 'submitted' | 'hidden';
+  syncedAt: string;
+}
+
+interface KtalkSyncStatusInfo {
+  configured: boolean;
+  domain: string;
+  isSyncing: boolean;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+  lastAddedCount: number;
+  lastFetchedCount: number;
+}
+
+function formatKtalkDateTime(isoStr: string): string {
+  if (!isoStr) return 'Дата не указана';
+  const d = new Date(isoStr);
+  if (Number.isNaN(d.getTime())) return isoStr;
+  return d.toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
 export default function App() {
   // Аутентификация
   const [authToken, setAuthToken] = useState<string>(() => localStorage.getItem('curator_token') || '');
   const [currentUser, setCurrentUser] = useState<CuratorUser | null>(() => {
     const raw = localStorage.getItem('curator_profile');
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      localStorage.removeItem('curator_profile');
+      return null;
+    }
   });
 
   // Состояние формы входа (Email OTP)
@@ -184,17 +236,34 @@ export default function App() {
   const [activeDetailTask, setActiveDetailTask] = useState<any | null>(null);
   const [rawJsonModalTask, setRawJsonModalTask] = useState<any | null>(null);
   const [copiedRawJson, setCopiedRawJson] = useState<boolean>(false);
+  const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
+  const [dashboardNotice, setDashboardNotice] = useState<string>('');
 
-  // Форма отправки встречи КТалк
+  // Форма отправки встречи КТалк (без фейкового предзаполнения)
   const [lectureUrl, setLectureUrl] = useState<string>('');
   const [selectedTeacher, setSelectedTeacher] = useState<string>('');
   const [newTeacherName, setNewTeacherName] = useState<string>('');
-  const [subject, setSubject] = useState<string>('Олимпиадная математика');
-  const [groupName, setGroupName] = useState<string>('10-11 класс (Всеросс)');
+  const [subject, setSubject] = useState<string>('');
+  const [groupName, setGroupName] = useState<string>('');
   const [isSubmittingTask, setIsSubmittingTask] = useState<boolean>(false);
   const [submitSuccessTask, setSubmitSuccessTask] = useState<any | null>(null);
+  const [submitSuccessMessage, setSubmitSuccessMessage] = useState<string>('');
   const [submitError, setSubmitError] = useState<string>('');
   const [duplicateErrorTask, setDuplicateErrorTask] = useState<any | null>(null);
+
+  // Список непроверенных и скрытых записей Контур.Толк
+  const [unreviewedRecordings, setUnreviewedRecordings] = useState<KtalkRecordingItem[]>([]);
+  const [hiddenRecordings, setHiddenRecordings] = useState<KtalkRecordingItem[]>([]);
+  const [showHiddenKtalk, setShowHiddenKtalk] = useState<boolean>(false);
+  const [isLoadingHiddenKtalk, setIsLoadingHiddenKtalk] = useState<boolean>(false);
+  const [restoringRecordingKey, setRestoringRecordingKey] = useState<string | null>(null);
+  const [ktalkSyncStatus, setKtalkSyncStatus] = useState<KtalkSyncStatusInfo | null>(null);
+  const [isLoadingKtalk, setIsLoadingKtalk] = useState<boolean>(false);
+  const [isSyncingKtalk, setIsSyncingKtalk] = useState<boolean>(false);
+  const [ktalkSyncNotice, setKtalkSyncNotice] = useState<string>('');
+  const [ktalkSearchQuery, setKtalkSearchQuery] = useState<string>('');
+  const [selectedKtalkRecording, setSelectedKtalkRecording] = useState<KtalkRecordingItem | null>(null);
+  const [hidingRecordingKey, setHidingRecordingKey] = useState<string | null>(null);
 
   // Управление кураторами (ТОЛЬКО ДЛЯ СТАРШИХ КУРАТОРОВ)
   const [curatorsList, setCuratorsList] = useState<CuratorUser[]>([]);
@@ -204,24 +273,31 @@ export default function App() {
   const [newCuratorRole, setNewCuratorRole] = useState<'curator' | 'senior_curator'>('curator');
   const [curatorActionMessage, setCuratorActionMessage] = useState<string>('');
   const [curatorActionError, setCuratorActionError] = useState<string>('');
+  const [confirmDeleteCuratorEmail, setConfirmDeleteCuratorEmail] = useState<string | null>(null);
 
   // Журнал аудита базы данных (ТОЛЬКО ДЛЯ СТАРШИХ КУРАТОРОВ)
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [isLoadingAudit, setIsLoadingAudit] = useState<boolean>(false);
   const [auditSearch, setAuditSearch] = useState<string>('');
 
-  // Динамические критерии оценки
+  // Динамические критерии оценки и настройки формата отчёта (Н/П)
   const [dynamicStandardCriteria, setDynamicStandardCriteria] = useState<any[]>(STANDARD_CRITERIA);
   const [dynamicCriticalCriteria, setDynamicCriticalCriteria] = useState<any[]>(CRITICAL_CRITERIA);
+  const [reportSettings, setReportSettings] = useState<ReportDisplaySettings>({
+    displayMode: 'five_point',
+    naBadgeText: 'Н/П',
+    naDescription: 'Критерий не применим к формату данного занятия — исключён из максимального и набранного балла.'
+  });
   const [criteriaSearch, setCriteriaSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
 
   const isSenior = currentUser?.role === 'senior_curator' || currentUser?.email?.toLowerCase() === 'shurygin.egor2009@gmail.com';
 
   const fetchCriteriaConfig = async () => {
+    if (!authToken) return;
     try {
       const res = await fetch('/api/criteria/config', {
-        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+        headers: { Authorization: `Bearer ${authToken}` }
       });
       const data = await res.json();
       if (data.success) {
@@ -230,6 +306,9 @@ export default function App() {
         }
         if (Array.isArray(data.criticalCriteria) && data.criticalCriteria.length > 0) {
           setDynamicCriticalCriteria(data.criticalCriteria);
+        }
+        if (data.reportSettings) {
+          setReportSettings(data.reportSettings);
         }
       }
     } catch (e) {
@@ -271,14 +350,182 @@ export default function App() {
       if (dataTeachers.success) {
         const list = Array.isArray(dataTeachers.teachers) ? dataTeachers.teachers : [];
         setTeachersList(list);
-        if (list.length > 0 && !selectedTeacher) {
-          setSelectedTeacher(list[0]);
-        } else if (list.length === 0) {
+        if (list.length === 0 && !selectedTeacher) {
           setSelectedTeacher('__new__');
         }
       }
     } catch (e) {
       console.error('Ошибка загрузки данных:', e);
+    }
+  };
+
+  // Загрузка списка непроверенных записей из Контур.Толк
+  const fetchUnreviewedRecordings = async () => {
+    if (!authToken) return;
+    setIsLoadingKtalk(true);
+    try {
+      const res = await fetch('/api/ktalk/recordings', {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      const data = await res.json();
+      if (data.success) {
+        const list: KtalkRecordingItem[] = Array.isArray(data.recordings) ? data.recordings : [];
+        setUnreviewedRecordings(list);
+        if (data.syncStatus) {
+          setKtalkSyncStatus(data.syncStatus);
+        }
+        setSelectedKtalkRecording(prev =>
+          prev ? list.find(r => r.recordingKey === prev.recordingKey) || null : null
+        );
+      }
+    } catch (e) {
+      console.error('Ошибка загрузки записей КТалк:', e);
+    } finally {
+      setIsLoadingKtalk(false);
+    }
+  };
+
+  // Ручное обновление списка встреч из Контур.Толк
+  const handleManualKtalkSync = async () => {
+    if (!authToken || isSyncingKtalk) return;
+    setIsSyncingKtalk(true);
+    setKtalkSyncNotice('');
+    try {
+      const res = await fetch('/api/ktalk/sync', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      const data = await res.json();
+      if (data.syncStatus) {
+        setKtalkSyncStatus(data.syncStatus);
+      }
+      if (Array.isArray(data.recordings)) {
+        setUnreviewedRecordings(data.recordings);
+        setSelectedKtalkRecording(prev =>
+          prev ? data.recordings.find((r: KtalkRecordingItem) => r.recordingKey === prev.recordingKey) || null : null
+        );
+      }
+      if (data.success) {
+        setKtalkSyncNotice(
+          `Синхронизировано записей: ${data.fetchedCount ?? 0}, новых: ${data.addedCount ?? 0}`
+        );
+      } else {
+        setKtalkSyncNotice(data.error || 'Не удалось обновить список встреч.');
+      }
+    } catch (e: any) {
+      setKtalkSyncNotice(e?.message || 'Ошибка соединения при синхронизации.');
+    } finally {
+      setIsSyncingKtalk(false);
+    }
+  };
+
+  // Выбор непроверенной встречи: подставляется ТОЛЬКО ссылка, все остальные поля куратор заполняет вручную
+  const handleSelectKtalkRecording = (rec: KtalkRecordingItem) => {
+    setSelectedKtalkRecording(rec);
+    setLectureUrl(rec.lectureUrl);
+    setSubmitError('');
+    setDuplicateErrorTask(null);
+    setSubmitSuccessTask(null);
+    setSubmitSuccessMessage('');
+  };
+
+  // Скрытие нецелевой встречи ("Скрыть / Не лекция")
+  const handleHideKtalkRecording = async (e: React.MouseEvent, rec: KtalkRecordingItem) => {
+    e.stopPropagation();
+    if (!authToken || hidingRecordingKey) return;
+    setHidingRecordingKey(rec.recordingKey);
+    try {
+      const res = await fetch(`/api/ktalk/recordings/${encodeURIComponent(rec.recordingKey)}/hide`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setUnreviewedRecordings(prev => prev.filter(item => item.recordingKey !== rec.recordingKey));
+        if (selectedKtalkRecording?.recordingKey === rec.recordingKey) {
+          setSelectedKtalkRecording(null);
+          if (lectureUrl.trim() === rec.lectureUrl.trim()) {
+            setLectureUrl('');
+          }
+        }
+        if (showHiddenKtalk) {
+          void fetchHiddenRecordings();
+        }
+      }
+    } catch (err) {
+      console.error('Ошибка скрытия записи КТалк:', err);
+    } finally {
+      setHidingRecordingKey(null);
+    }
+  };
+
+  // Загрузка списка скрытых записей Контур.Толк
+  const fetchHiddenRecordings = async () => {
+    if (!authToken) return;
+    setIsLoadingHiddenKtalk(true);
+    try {
+      const res = await fetch('/api/ktalk/recordings/hidden', {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setHiddenRecordings(Array.isArray(data.recordings) ? data.recordings : []);
+      }
+    } catch (err) {
+      console.error('Ошибка загрузки скрытых записей КТалк:', err);
+    } finally {
+      setIsLoadingHiddenKtalk(false);
+    }
+  };
+
+  // Возвращение скрытой встречи в список непроверенных
+  const handleRestoreKtalkRecording = async (e: React.MouseEvent, rec: KtalkRecordingItem) => {
+    e.stopPropagation();
+    if (!authToken || restoringRecordingKey) return;
+    setRestoringRecordingKey(rec.recordingKey);
+    try {
+      const res = await fetch(`/api/ktalk/recordings/${encodeURIComponent(rec.recordingKey)}/restore`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setHiddenRecordings(prev => prev.filter(item => item.recordingKey !== rec.recordingKey));
+        await fetchUnreviewedRecordings();
+      }
+    } catch (err) {
+      console.error('Ошибка восстановления записи КТалк:', err);
+    } finally {
+      setRestoringRecordingKey(null);
+    }
+  };
+
+  // Повторный запуск сбойной или поврежденной лекции в очередь FIFO
+  const handleRetryTask = async (e: React.MouseEvent, taskId: string) => {
+    e.stopPropagation();
+    if (!authToken || retryingTaskId) return;
+    setRetryingTaskId(taskId);
+    setDashboardNotice('');
+    try {
+      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/retry`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setDashboardNotice(data.message || 'Лекция возвращена в очередь FIFO на повторную проверку.');
+        if (rawJsonModalTask?.id === taskId) {
+          setRawJsonModalTask(null);
+        }
+        await fetchTasksAndTeachers();
+        setTimeout(() => setDashboardNotice(''), 5000);
+      } else {
+        setDashboardNotice(data.message || 'Не удалось перезапустить проверку.');
+      }
+    } catch (err: any) {
+      setDashboardNotice(err?.message || 'Ошибка соединения при перезапуске.');
+    } finally {
+      setRetryingTaskId(null);
     }
   };
 
@@ -324,6 +571,7 @@ export default function App() {
     fetchCriteriaConfig();
     if (authToken) {
       fetchTasksAndTeachers();
+      fetchUnreviewedRecordings();
       if (isSenior) {
         fetchCurators();
         fetchAuditLogs();
@@ -331,23 +579,36 @@ export default function App() {
     }
   }, [authToken, isSenior]);
 
-  // Повторный запрос при переключении на вкладки "Управление кураторами" и "Аудит действий"
+  // Повторный запрос при переключении вкладок
   useEffect(() => {
-    if (authToken && isSenior) {
+    if (!authToken) return;
+    if (activeTab === 'submit') {
+      fetchUnreviewedRecordings();
+    }
+    if (isSenior) {
       if (activeTab === 'curators') fetchCurators();
       if (activeTab === 'audit') fetchAuditLogs();
     }
   }, [activeTab, authToken, isSenior]);
 
-  // Опрос статусов активных задач каждые 4 секунды
+  // Автообновление списка непроверенных встреч каждые 60 сек, пока открыта вкладка отправки
+  useEffect(() => {
+    if (!authToken || activeTab !== 'submit') return;
+    const interval = setInterval(() => {
+      fetchUnreviewedRecordings();
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [authToken, activeTab]);
+
+  // Непрерывный опрос статуса задач: каждые 4 сек при активной очереди и каждые 15 сек в фоне
   useEffect(() => {
     if (!authToken) return;
     const hasPending = tasks.some(t => t.status !== 'completed' && t.status !== 'failed');
-    if (!hasPending) return;
+    const delayMs = hasPending ? 4000 : 15000;
 
     const interval = setInterval(() => {
-      fetchTasksAndTeachers();
-    }, 4000);
+      void fetchTasksAndTeachers();
+    }, delayMs);
     return () => clearInterval(interval);
   }, [authToken, tasks]);
 
@@ -435,9 +696,12 @@ export default function App() {
     e.preventDefault();
     setSubmitError('');
     setSubmitSuccessTask(null);
+    setSubmitSuccessMessage('');
     setDuplicateErrorTask(null);
 
-    const teacherToUse = selectedTeacher === '__new__' ? newTeacherName.trim() : selectedTeacher;
+    const teacherToUse = selectedTeacher === '__new__' ? newTeacherName.trim() : selectedTeacher.trim();
+    const cleanSubject = subject.trim();
+    const cleanGroup = groupName.trim();
 
     if (!lectureUrl.trim()) {
       setSubmitError('Укажите ссылку на встречу КТалк.');
@@ -445,6 +709,14 @@ export default function App() {
     }
     if (!teacherToUse) {
       setSubmitError('Выберите или введите ФИО преподавателя.');
+      return;
+    }
+    if (!cleanSubject) {
+      setSubmitError('Укажите дисциплину / предмет.');
+      return;
+    }
+    if (!cleanGroup) {
+      setSubmitError('Укажите группу / параллель.');
       return;
     }
 
@@ -459,8 +731,8 @@ export default function App() {
         body: JSON.stringify({
           lectureUrl: lectureUrl.trim(),
           teacherName: teacherToUse,
-          subject,
-          groupName
+          subject: cleanSubject,
+          groupName: cleanGroup
         })
       });
       const data = await res.json();
@@ -473,11 +745,23 @@ export default function App() {
         return;
       }
 
+      const submittedUrlNorm = lectureUrl.trim().toLowerCase().replace(/\/+$/, '');
       setSubmitSuccessTask(data.task);
+      setSubmitSuccessMessage(data.message || 'Заявка добавлена в очередь на проверку.');
+      setUnreviewedRecordings(prev =>
+        prev.filter(
+          r =>
+            r.recordingKey !== selectedKtalkRecording?.recordingKey &&
+            r.lectureUrl.trim().toLowerCase().replace(/\/+$/, '') !== submittedUrlNorm
+        )
+      );
+      setSelectedKtalkRecording(null);
       setLectureUrl('');
+      setSubject('');
+      setGroupName('');
+      setNewTeacherName('');
       setTasks(prev => [data.task, ...prev.filter(t => t.id !== data.task.id)]);
-      setActiveTab('dashboard');
-      await fetchTasksAndTeachers();
+      await Promise.all([fetchTasksAndTeachers(), fetchUnreviewedRecordings()]);
       if (isSenior) {
         fetchAuditLogs();
         fetchCurators();
@@ -579,11 +863,11 @@ export default function App() {
     }
   };
 
-  // Удаление куратора из белого списка
-  const handleDeleteCurator = async (email: string) => {
-    if (!window.confirm(`Вы действительно хотите удалить куратора ${email} из белого списка системы?`)) {
-      return;
-    }
+  // Удаление куратора из белого списка (через внутрипрограммное подтверждение)
+  const confirmAndDeleteCurator = async () => {
+    const email = confirmDeleteCuratorEmail;
+    if (!email) return;
+    setConfirmDeleteCuratorEmail(null);
     setCuratorActionError('');
     setCuratorActionMessage('');
     try {
@@ -605,51 +889,29 @@ export default function App() {
     }
   };
 
-  // 7. Экспорт в Excel (.xlsx) через клиентскую библиотеку xlsx
-  const handleClientExportExcel = () => {
-    const completedTasks = tasks.filter(t => t.status === 'completed');
-
-    // Сводка преподавателей
-    const teacherMap = new Map<string, { count: number; totalScore: number; criticalCount: number }>();
-    completedTasks.forEach(t => {
-      const cur = teacherMap.get(t.teacherName) || { count: 0, totalScore: 0, criticalCount: 0 };
-      cur.count++;
-      cur.totalScore += t.totalScore;
-      if (t.criticalViolations && t.criticalViolations.length > 0) cur.criticalCount++;
-      teacherMap.set(t.teacherName, cur);
-    });
-
-    const summaryRows = Array.from(teacherMap.entries()).map(([name, data]) => ({
-      "Преподаватель": name,
-      "Проверено уроков": data.count,
-      "Средний балл": Math.round(data.totalScore / data.count),
-      "Критических инцидентов": data.criticalCount,
-      "Статус": Math.round(data.totalScore / data.count) >= 90 ? "Эталон" : "Стандарт"
-    }));
-
-    // Реестр проверок
-    const detailRows = completedTasks.map(t => ({
-      "ID": t.id,
-      "Дата": t.date,
-      "Преподаватель": t.teacherName,
-      "Предмет": t.subject,
-      "Группа": t.groupName,
-      "Ссылка на запись КТалк": t.lectureUrl,
-      "Итоговый балл (из 100)": t.totalScore,
-      "Критические нарушения": t.criticalViolations?.join('; ') || 'Нет',
-      "Сильные стороны": t.positiveHighlights?.join('; ') || 'Соответствует стандартам',
-      "Рекомендации методиста": t.recommendations?.join('; ') || 'Замечаний нет',
-      "Проверил куратор": t.curatorEmail
-    }));
-
-    const wb = XLSX.utils.book_new();
-    const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
-    const wsDetails = XLSX.utils.json_to_sheet(detailRows);
-
-    XLSX.utils.book_append_sheet(wb, wsSummary, "Сводка преподавателей");
-    XLSX.utils.book_append_sheet(wb, wsDetails, "Реестр всех проверок");
-
-    XLSX.writeFile(wb, "Olympiad_Practices_Analytics_2026.xlsx");
+  // 7. Серверный экспорт в Excel (.xlsx) с обязательной записью в audit_logs БД
+  const handleServerExportExcel = async () => {
+    try {
+      const res = await fetch('/api/analytics/export-excel', {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      if (!res.ok) {
+        setDashboardNotice('Не удалось выгрузить Excel-отчет с сервера.');
+        return;
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'Olympiad_Practices_Analytics_2026.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Ошибка выгрузки Excel:', err);
+      setDashboardNotice('Ошибка соединения при выгрузке отчета.');
+    }
   };
 
   // Фильтрация уроков в дашборде
@@ -860,7 +1122,12 @@ export default function App() {
             }`}
           >
             <Video className="w-3.5 h-3.5 text-[#38BDF8]" />
-            Проверить встречу КТалк
+            <span>Проверить встречу КТалк</span>
+            {unreviewedRecordings.length > 0 && (
+              <span className="font-mono tabular-nums text-[11px] font-bold text-[#38BDF8]">
+                ({unreviewedRecordings.length})
+              </span>
+            )}
           </button>
 
           <button
@@ -964,38 +1231,71 @@ export default function App() {
         {/* ======================================================== */}
         {/* ВКЛАДКА 1: ДАШБОРД ПРЕПОДАВАТЕЛЕЙ + ЭКСПОРТ В EXCEL       */}
         {/* ======================================================== */}
-        {activeTab === 'dashboard' && (
+        {activeTab === 'dashboard' && (() => {
+          const validCompletedTasks = tasks.filter(
+            t => t.status === 'completed' && !t.isCorrupted && typeof t.totalScore === 'number'
+          );
+          const avgScore =
+            validCompletedTasks.length > 0
+              ? Math.round(
+                  validCompletedTasks.reduce((acc, t) => acc + Number(t.totalScore), 0) /
+                    validCompletedTasks.length
+                )
+              : null;
+          const activeWorkerTasks = tasks.filter(
+            t =>
+              t.status === 'downloading' ||
+              t.status === 'extracting' ||
+              t.status === 'uploading' ||
+              t.status === 'analyzing'
+          );
+          const queuedPendingTasks = tasks.filter(t => t.status === 'pending');
+
+          return (
           <div className="space-y-6 animate-fade-in">
-            {/* KPI карточки */}
+            {dashboardNotice && (
+              <div className="p-3.5 bg-[#38BDF8]/10 border border-[#38BDF8]/30 rounded-2xl text-xs text-[#38BDF8] flex items-center justify-between gap-2">
+                <span>{dashboardNotice}</span>
+                <button
+                  type="button"
+                  onClick={() => setDashboardNotice('')}
+                  className="text-indigo-300 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
+            {/* KPI карточки (честный подсчет строго по валидно проверенным занятиям) */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-[#1B153B] border border-indigo-800/50 rounded-2xl p-4">
                 <div className="text-[11px] text-indigo-300 font-medium">Проверено занятий</div>
                 <div className="text-2xl font-black text-white mt-1 tabular-nums">
-                  {tasks.filter(t => t.status === 'completed').length}
+                  {validCompletedTasks.length}
                 </div>
-                <div className="text-[10px] text-emerald-400 mt-1">Оцифровано нейросетью</div>
+                <div className="text-[10px] text-emerald-400 mt-1">Успешно оценено GigaChat</div>
               </div>
 
               <div className="bg-[#1B153B] border border-indigo-800/50 rounded-2xl p-4">
                 <div className="text-[11px] text-indigo-300 font-medium">Средний балл школы</div>
                 <div className="text-2xl font-black text-[#FF5252] mt-1 tabular-nums">
-                  {tasks.filter(t => t.status === 'completed').length > 0
-                    ? Math.round(
-                        tasks
-                          .filter(t => t.status === 'completed')
-                          .reduce((acc, t) => acc + t.totalScore, 0) /
-                          tasks.filter(t => t.status === 'completed').length
-                      )
-                    : 0}{' '}
-                  <span className="text-sm font-normal text-indigo-300">/ 100</span>
+                  {avgScore !== null ? (
+                    <>
+                      {avgScore} <span className="text-sm font-normal text-indigo-300">/ 100</span>
+                    </>
+                  ) : (
+                    <span className="text-indigo-400">—</span>
+                  )}
                 </div>
-                <div className="text-[10px] text-indigo-300 mt-1">Педагогический стандарт</div>
+                <div className="text-[10px] text-indigo-300 mt-1">
+                  {avgScore !== null ? 'Только валидные проверки' : 'Нет завершённых оценок'}
+                </div>
               </div>
 
               <div className="bg-[#1B153B] border border-indigo-800/50 rounded-2xl p-4">
                 <div className="text-[11px] text-indigo-300 font-medium">Эталонных занятий (90+)</div>
                 <div className="text-2xl font-black text-emerald-400 mt-1 tabular-nums">
-                  {tasks.filter(t => t.status === 'completed' && t.totalScore >= 90).length}
+                  {validCompletedTasks.filter(t => t.totalScore >= 90).length}
                 </div>
                 <div className="text-[10px] text-emerald-400/80 mt-1">Высокий методический уровень</div>
               </div>
@@ -1003,7 +1303,7 @@ export default function App() {
               <div className="bg-[#1B153B] border border-indigo-800/50 rounded-2xl p-4">
                 <div className="text-[11px] text-indigo-300 font-medium">Критических замечаний</div>
                 <div className="text-2xl font-black text-amber-400 mt-1 tabular-nums">
-                  {tasks.filter(t => t.criticalViolations && t.criticalViolations.length > 0).length}
+                  {validCompletedTasks.filter(t => t.criticalViolations && t.criticalViolations.length > 0).length}
                 </div>
                 <div className="text-[10px] text-amber-400/80 mt-1">Требуют внимания куратора</div>
               </div>
@@ -1040,8 +1340,8 @@ export default function App() {
 
               <div className="flex items-center gap-3 w-full md:w-auto justify-end">
                 <button
-                  onClick={handleClientExportExcel}
-                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-emerald-900/40 flex items-center gap-2 shrink-0"
+                  onClick={handleServerExportExcel}
+                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-emerald-900/40 flex items-center gap-2 shrink-0 cursor-pointer"
                 >
                   <FileSpreadsheet className="w-4 h-4" />
                   <span>Выгрузить в Excel (.xlsx)</span>
@@ -1051,11 +1351,21 @@ export default function App() {
 
             {/* Таблица проверенных уроков */}
             <div className="bg-[#1B153B] border border-indigo-800/50 rounded-3xl overflow-hidden shadow-xl">
-              <div className="px-6 py-4 border-b border-indigo-900/50 flex items-center justify-between">
-                <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                  <FileText className="w-4 h-4 text-[#FF5252]" />
-                  <span>Реестр проверенных занятий ({filteredTasks.length})</span>
-                </h3>
+              <div className="px-6 py-4 border-b border-indigo-900/50 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-[#FF5252]" />
+                    <span>Реестр проверенных занятий ({filteredTasks.length})</span>
+                  </h3>
+                  {(activeWorkerTasks.length > 0 || queuedPendingTasks.length > 0) && (
+                    <span className="inline-flex items-center gap-1.5 text-[11px] text-cyan-300 font-semibold bg-cyan-500/10 border border-cyan-500/30 px-2.5 py-1 rounded-lg">
+                      <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>
+                        Очередь GigaChat: в работе {activeWorkerTasks.length} • ожидают {queuedPendingTasks.length}
+                      </span>
+                    </span>
+                  )}
+                </div>
                 <span className="text-xs text-indigo-300">
                   Кликните по строке для детального отчета с таймкодами
                 </span>
@@ -1075,27 +1385,38 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-indigo-900/30">
-                    {filteredTasks.map((t) => (
+                    {filteredTasks.map((t) => {
+                      const hasCritical = Array.isArray(t.criticalViolations) && t.criticalViolations.length > 0;
+                      const isCompletedValid = t.status === 'completed' && !t.isCorrupted && typeof t.totalScore === 'number';
+                      const canRetry = t.status === 'failed' || Boolean(t.isCorrupted);
+
+                      return (
                       <tr
                         key={t.id}
                         onClick={() => {
-                          if (t.status === 'completed') {
+                          if (isCompletedValid) {
                             setActiveDetailTask(t);
-                          } else if (t.isCorrupted) {
+                          } else if (t.isCorrupted || t.rawBrokenResponse) {
                             setRawJsonModalTask(t);
                           }
                         }}
                         className={`transition-colors group ${
-                          t.status === 'completed' || t.isCorrupted
+                          isCompletedValid || t.isCorrupted || t.rawBrokenResponse
                             ? 'hover:bg-[#241E4F]/50 cursor-pointer'
-                            : 'opacity-80 cursor-default'
+                            : 'opacity-85 cursor-default'
                         }`}
                       >
                         <td className="px-6 py-4 font-mono text-indigo-200/80 whitespace-nowrap">
                           {t.date}
                         </td>
                         <td className="px-6 py-4 font-bold text-white">
-                          {t.teacherName}
+                          <div>{t.teacherName}</div>
+                          {hasCritical && isCompletedValid && (
+                            <div className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold text-rose-300">
+                              <AlertTriangle className="w-3 h-3 text-rose-400" />
+                              <span>Крит. нарушение</span>
+                            </div>
+                          )}
                         </td>
                         <td className="px-6 py-4 text-indigo-200">
                           <div>{t.subject}</div>
@@ -1120,34 +1441,62 @@ export default function App() {
                         <td className="px-6 py-4 text-center">
                           {t.isCorrupted ? (
                             <span className="inline-block px-2.5 py-1 rounded-lg font-mono font-bold text-[11px] bg-rose-500/20 text-rose-300 border border-rose-500/30">
-                              Сбой JSON
+                              Не оценено
                             </span>
-                          ) : t.status === 'completed' ? (
-                            <span
-                              className={`inline-block px-2.5 py-1 rounded-lg font-mono font-bold text-xs ${
-                                t.totalScore >= 90
-                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                  : t.totalScore >= 80
-                                  ? 'bg-[#38BDF8]/20 text-[#38BDF8] border border-[#38BDF8]/30'
-                                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                              }`}
-                            >
-                              {t.totalScore} / 100
-                            </span>
+                          ) : isCompletedValid ? (
+                            <div className="space-y-1">
+                              <span
+                                className={`inline-block px-2.5 py-1 rounded-lg font-mono font-bold text-xs tabular-nums ${
+                                  hasCritical
+                                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                    : t.totalScore >= 90
+                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                    : t.totalScore >= 80
+                                    ? 'bg-[#38BDF8]/20 text-[#38BDF8] border border-[#38BDF8]/30'
+                                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                }`}
+                              >
+                                {t.totalScore} / 100
+                              </span>
+                              {typeof t.applicableCount === 'number' && Array.isArray(t.criteria) && t.criteria.length > 0 && t.applicableCount < t.criteria.length && (
+                                <div className="text-[10px] font-mono text-indigo-300">
+                                  учтено {t.applicableCount}/{t.criteria.length}
+                                </div>
+                              )}
+                            </div>
                           ) : (
                             <span className="text-indigo-400 font-mono">—</span>
                           )}
                         </td>
-                        <td className="px-6 py-4">
-                          {t.isCorrupted ? (
+                        <td className="px-6 py-4 max-w-[240px]">
+                          {t.status === 'failed' ? (
+                            <div className="space-y-1">
+                              <span className="inline-flex items-center gap-1.5 text-[11px] text-rose-300 font-semibold bg-rose-500/10 border border-rose-500/30 px-2.5 py-1 rounded-lg">
+                                <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                                <span>{t.isCorrupted ? 'Разбор повреждён' : 'Ошибка проверки'}</span>
+                              </span>
+                              {t.errorMessage && (
+                                <div className="text-[11px] text-rose-200/80 leading-snug line-clamp-2" title={t.errorMessage}>
+                                  {t.errorMessage}
+                                </div>
+                              )}
+                            </div>
+                          ) : t.isCorrupted ? (
                             <span className="inline-flex items-center gap-1.5 text-[11px] text-amber-300 font-semibold bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 rounded-lg">
                               <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                              Разбор поврежден
+                              Разбор повреждён
                             </span>
                           ) : t.status === 'completed' ? (
                             <span className="inline-flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium">
                               <CheckCircle2 className="w-3.5 h-3.5" />
                               Проверено GigaChat
+                            </span>
+                          ) : t.status === 'pending' ? (
+                            <span className="inline-flex items-center gap-1.5 text-[11px] text-indigo-200 font-semibold bg-indigo-500/15 border border-indigo-400/30 px-2.5 py-1 rounded-lg">
+                              <Clock className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                              <span>
+                                В очереди FIFO {t.queuePosition ? `(#${t.queuePosition})` : ''}
+                              </span>
                             </span>
                           ) : (
                             <div className="space-y-1">
@@ -1156,7 +1505,9 @@ export default function App() {
                                 {t.status === 'downloading'
                                   ? 'Загрузка видео (КТалк)...'
                                   : t.status === 'extracting'
-                                  ? 'Нарезка ffmpeg...'
+                                  ? 'Нарезка аудио и кадров...'
+                                  : t.status === 'uploading'
+                                  ? 'Выгрузка в GigaChat...'
                                   : 'Анализ нейросетью...'}
                               </span>
                               <div className="w-28 bg-[#14102C] h-1.5 rounded-full overflow-hidden">
@@ -1169,7 +1520,42 @@ export default function App() {
                           )}
                         </td>
                         <td className="px-6 py-4 text-right">
-                          {t.status !== 'completed' && !t.isCorrupted ? (
+                          {canRetry ? (
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={(e) => handleRetryTask(e, t.id)}
+                                disabled={retryingTaskId === t.id}
+                                className="px-3 py-1.5 bg-[#FF5252] hover:bg-[#ff3b3b] disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer"
+                                title="Повторно поставить лекцию в очередь проверки GigaChat"
+                              >
+                                <RotateCcw className={`w-3.5 h-3.5 ${retryingTaskId === t.id ? 'animate-spin' : ''}`} />
+                                <span>{retryingTaskId === t.id ? 'Запуск...' : 'Повторить'}</span>
+                              </button>
+                              {t.rawBrokenResponse && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setRawJsonModalTask(t);
+                                  }}
+                                  className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 hover:text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1 cursor-pointer"
+                                  title="Открыть сырой ответ / ошибку"
+                                >
+                                  <FileText className="w-3.5 h-3.5 text-amber-400" />
+                                </button>
+                              )}
+                            </div>
+                          ) : t.status === 'pending' ? (
+                            <button
+                              disabled
+                              className="px-2.5 py-1.5 bg-indigo-950/50 border border-indigo-700/40 text-indigo-300/80 rounded-xl text-xs font-medium cursor-not-allowed ml-auto flex items-center gap-1.5"
+                              title="Лекция ожидает своей очереди на анализ в GigaChat"
+                            >
+                              <Clock className="w-3 h-3 text-cyan-400" />
+                              <span>Ожидает {t.queuePosition ? `#${t.queuePosition}` : '...'}</span>
+                            </button>
+                          ) : t.status !== 'completed' ? (
                             <button
                               disabled
                               className="px-2.5 py-1.5 bg-indigo-950/30 border border-indigo-800/20 text-indigo-400/40 rounded-xl text-xs font-medium cursor-not-allowed ml-auto flex items-center gap-1.5"
@@ -1177,25 +1563,13 @@ export default function App() {
                             >
                               <span>В процессе...</span>
                             </button>
-                          ) : t.isCorrupted ? (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setRawJsonModalTask(t);
-                              }}
-                              className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ml-auto shadow-sm"
-                              title="Открыть сырой поломанный JSON от нейросети"
-                            >
-                              <FileText className="w-3.5 h-3.5 text-amber-400" />
-                              <span>Сырой ответ ИИ</span>
-                            </button>
                           ) : (
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setActiveDetailTask(t);
                               }}
-                              className="text-[#FF5252] group-hover:text-white font-semibold text-xs flex items-center gap-1 ml-auto"
+                              className="text-[#FF5252] group-hover:text-white font-semibold text-xs flex items-center gap-1 ml-auto cursor-pointer"
                             >
                               <span>Подробнее</span>
                               <ChevronRight className="w-3.5 h-3.5" />
@@ -1203,7 +1577,8 @@ export default function App() {
                           )}
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                     {filteredTasks.length === 0 && (
                       <tr>
                         <td colSpan={7} className="px-6 py-12 text-center text-xs text-indigo-300">
@@ -1235,279 +1610,669 @@ export default function App() {
               </div>
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* ======================================================== */}
         {/* ВКЛАДКА 2: ОТПРАВКА ВСТРЕЧИ КТАЛК НА АНАЛИЗ               */}
         {/* ======================================================== */}
-        {activeTab === 'submit' && (
-          <div className="space-y-6 max-w-3xl mx-auto animate-fade-in">
-            <div className="bg-gradient-to-r from-[#241E4F] via-[#2B2363] to-[#1F1A44] border border-indigo-500/30 rounded-3xl p-6 shadow-xl space-y-2">
-              <span className="bg-[#38BDF8]/20 text-[#38BDF8] border border-[#38BDF8]/30 text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full tracking-wider">
-                КТалк API • Прямой аудит
-              </span>
-              <h2 className="text-xl font-black text-white">
-                Отправить запись вебинара на проверку
-              </h2>
-              <p className="text-xs text-indigo-200/80 leading-relaxed">
-                Вставьте ссылку на запись встречи КТалк. Сервер в РФ автоматически скачает видео, извлечет звук, нарежет ключевые кадры через <code className="text-white bg-[#14102C] px-1.5 py-0.5 rounded">ffmpeg</code> и передаст данные в <strong className="text-white">Сбер GigaChat-2-Pro</strong>.
-              </p>
-            </div>
+        {activeTab === 'submit' && (() => {
+          const q = ktalkSearchQuery.trim().toLowerCase();
+          const filteredUnreviewed = unreviewedRecordings.filter(r => {
+            if (!q) return true;
+            return (
+              (r.title || '').toLowerCase().includes(q) ||
+              (r.authorName || '').toLowerCase().includes(q) ||
+              (r.authorLogin || '').toLowerCase().includes(q) ||
+              (r.authorEmail || '').toLowerCase().includes(q) ||
+              (r.roomName || '').toLowerCase().includes(q) ||
+              (r.recordingKey || '').toLowerCase().includes(q) ||
+              formatKtalkDateTime(r.createdDate).toLowerCase().includes(q)
+            );
+          });
 
-            {submitError && (
-              <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-200 space-y-3 shadow-lg">
-                <div className="flex items-start gap-2.5">
-                  <AlertTriangle className="w-5 h-5 shrink-0 text-amber-400 mt-0.5" />
-                  <div className="space-y-1">
-                    <div className="font-bold text-amber-300 text-sm">
-                      {duplicateErrorTask ? '⚠️ Ссылка уже проверялась ранее!' : 'Ошибка отправки формы'}
-                    </div>
-                    <p className="text-xs text-indigo-200/90 leading-relaxed">{submitError}</p>
+          return (
+            <div className="space-y-6 max-w-7xl mx-auto animate-fade-in">
+              <div className="bg-gradient-to-r from-[#241E4F] via-[#2B2363] to-[#1F1A44] border border-indigo-500/30 rounded-3xl p-6 shadow-xl flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-[#38BDF8]">
+                    Контур.Толк • Авто-синхронизация каждые 5 минут
                   </div>
+                  <h2 className="text-xl font-black text-white">
+                    Новые записи вебинаров и отправка на проверку
+                  </h2>
+                  <p className="text-xs text-indigo-200/80 leading-relaxed max-w-3xl">
+                    Выберите непроверенную встречу из списка слева — её ссылка подставится автоматически, а все метаданные (название, дата, время, длительность, ведущий) откроются для сверки. Преподавателя, предмет и группу укажите вручную перед отправкой в очередь GigaChat.
+                  </p>
                 </div>
 
-                {duplicateErrorTask && (
-                  <div className="bg-[#14102C] border border-amber-500/30 rounded-xl p-3.5 space-y-2.5 mt-2">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
-                      <div>
-                        <span className="text-indigo-400">Преподаватель: </span>
-                        <strong className="text-white">{duplicateErrorTask.teacherName}</strong>
-                      </div>
-                      <div>
-                        <span className="text-indigo-400">Дата проверки: </span>
-                        <span className="text-indigo-200 font-mono">{duplicateErrorTask.date}</span>
-                      </div>
-                      <div>
-                        <span className="text-indigo-400">Предмет: </span>
-                        <span className="text-indigo-200">{duplicateErrorTask.subject}</span>
-                      </div>
-                      <div>
-                        <span className="text-indigo-400">Оценка ИИ: </span>
-                        <strong className="text-emerald-400 font-mono">{duplicateErrorTask.totalScore} / 100</strong>
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveTab('dashboard');
-                        setActiveDetailTask(duplicateErrorTask);
-                      }}
-                      className="mt-1 w-full py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <Search className="w-3.5 h-3.5" />
-                      <span>Открыть существующий результат проверки</span>
-                    </button>
+                {ktalkSyncStatus?.configured && ktalkSyncStatus.domain && (
+                  <div className="text-xs text-indigo-200/90 shrink-0 lg:text-right space-y-0.5">
+                    <div className="text-[11px] text-indigo-300">Пространство КТалк</div>
+                    <div className="font-mono font-semibold text-white">{ktalkSyncStatus.domain.replace(/^https?:\/\//i, '')}</div>
                   </div>
                 )}
               </div>
-            )}
 
-            {submitSuccessTask && (
-              <div className="p-5 bg-emerald-500/10 border border-emerald-500/30 rounded-3xl space-y-3">
-                <div className="flex items-center gap-2 text-emerald-300 font-bold text-sm">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                  <span>Заявка #{submitSuccessTask.id} успешно зарегистрирована!</span>
-                </div>
-                <p className="text-xs text-indigo-200">
-                  Анализ запущен в фоновом режиме. Вы можете отслеживать прогресс во вкладке «Дашборд преподавателей».
-                </p>
-                <button
-                  onClick={() => {
-                    setActiveTab('dashboard');
-                    setActiveDetailTask(submitSuccessTask);
-                  }}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5"
-                >
-                  <span>Перейти к карточке проверки</span>
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                {/* ЛЕВАЯ КОЛОНКА: СПИСОК НЕПРОВЕРЕННЫХ ВСТРЕЧ КОНТУР.ТОЛК */}
+                <div className="lg:col-span-6 bg-[#1B153B] border border-indigo-800/50 rounded-3xl p-5 space-y-4 shadow-xl">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                        <Video className="w-4 h-4 text-[#38BDF8]" />
+                        <span>Непроверенные встречи</span>
+                        <span className="font-mono tabular-nums text-xs text-[#38BDF8]">
+                          ({unreviewedRecordings.length})
+                        </span>
+                      </h3>
+                      <div className="text-[11px] text-indigo-300/80 mt-0.5 font-mono tabular-nums">
+                        {ktalkSyncStatus?.lastSyncedAt
+                          ? `Обновлено: ${formatKtalkDateTime(ktalkSyncStatus.lastSyncedAt)}`
+                          : 'Ожидание первой синхронизации'}
+                      </div>
+                    </div>
 
-            <form onSubmit={handleSubmitLecture} className="bg-[#1B153B] border border-indigo-800/50 rounded-3xl p-6 space-y-5 shadow-xl">
-              <div>
-                <label className="block text-xs font-bold text-white mb-1.5">
-                  1. Ссылка на запись встречи КТалк:
-                </label>
-                <input
-                  type="url"
-                  value={lectureUrl}
-                  onChange={(e) => setLectureUrl(e.target.value)}
-                  placeholder="https://company.ktalk.ru/recordings/abc-123-xyz"
-                  required
-                  className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-3 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252] transition-colors"
-                />
-                <span className="text-[10px] text-indigo-400 mt-1 block">
-                  Поддерживаются ссылки формата /recordings/ и /records/
-                </span>
-              </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = !showHiddenKtalk;
+                          setShowHiddenKtalk(next);
+                          if (next) void fetchHiddenRecordings();
+                        }}
+                        className={`px-3 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                          showHiddenKtalk
+                            ? 'bg-indigo-600/40 border-[#38BDF8] text-white'
+                            : 'bg-[#14102C] hover:bg-[#241E4F] border-indigo-700/60 text-indigo-300 hover:text-white'
+                        }`}
+                      >
+                        {showHiddenKtalk ? 'К новым встречам' : 'Скрытые'}
+                      </button>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
-                    <GraduationCap className="w-3.5 h-3.5 text-[#FF5252]" />
-                    <span>2. Преподаватель:</span>
-                  </label>
-                  <div className="relative">
-                    <select
-                      value={selectedTeacher}
-                      onChange={(e) => {
-                        setSelectedTeacher(e.target.value);
-                        if (e.target.value !== '__new__') {
-                          setNewTeacherName('');
-                        }
-                      }}
-                      className="w-full bg-[#14102C] border border-indigo-700/60 hover:border-indigo-500 rounded-xl px-3.5 py-3 text-xs text-white focus:outline-none focus:border-[#FF5252] transition-colors appearance-none cursor-pointer pr-8 shadow-inner"
-                    >
-                      {teachersList.length === 0 && (
-                        <option value="" disabled>Загрузка списка преподавателей...</option>
-                      )}
-                      {teachersList.map((t) => (
-                        <option key={t} value={t} className="bg-[#14102C] text-white py-1">
-                          👨‍🏫 {t}
-                        </option>
-                      ))}
-                      <option value="__new__" className="bg-[#1B153B] text-[#FF5252] font-bold py-1">
-                        ✨ + Добавить нового преподавателя...
-                      </option>
-                    </select>
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-indigo-400">
-                      ▼
+                      <button
+                        type="button"
+                        onClick={handleManualKtalkSync}
+                        disabled={isSyncingKtalk}
+                        className="px-3.5 py-2 bg-[#14102C] hover:bg-[#241E4F] border border-indigo-700/60 hover:border-[#38BDF8]/60 text-white rounded-xl text-xs font-semibold transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 text-[#38BDF8] ${isSyncingKtalk ? 'animate-spin' : ''}`} />
+                        <span>{isSyncingKtalk ? 'Обновление...' : 'Обновить список'}</span>
+                      </button>
                     </div>
                   </div>
-                </div>
 
-                {selectedTeacher === '__new__' && (
-                  <div className="animate-fade-in">
-                    <label className="block text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
-                      <UserPlus className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>ФИО нового преподавателя и предмет:</span>
-                    </label>
+                  {ktalkSyncStatus && !ktalkSyncStatus.configured && (
+                    <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-200 leading-relaxed">
+                      Автоматическая загрузка встреч отключена: задайте параметры <code className="font-mono text-white bg-[#14102C] px-1.5 py-0.5 rounded">TALK_DOMAIN</code> и <code className="font-mono text-white bg-[#14102C] px-1.5 py-0.5 rounded">TALK_API_KEY</code> в файле <code className="font-mono text-white bg-[#14102C] px-1.5 py-0.5 rounded">.env</code> на сервере. Вы по-прежнему можете вставить ссылку вручную.
+                    </div>
+                  )}
+
+                  {ktalkSyncStatus?.lastError && ktalkSyncStatus.configured && (
+                    <div className="p-3.5 bg-rose-500/10 border border-rose-500/30 rounded-2xl text-xs text-rose-200 flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      <span>{ktalkSyncStatus.lastError}</span>
+                    </div>
+                  )}
+
+                  {ktalkSyncNotice && !ktalkSyncStatus?.lastError && (
+                    <div className="px-3.5 py-2 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-300">
+                      {ktalkSyncNotice}
+                    </div>
+                  )}
+
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-indigo-400 absolute left-3.5 top-3" />
                     <input
                       type="text"
-                      value={newTeacherName}
-                      onChange={(e) => setNewTeacherName(e.target.value)}
-                      placeholder="Иван Петров (Математика)"
-                      required
-                      className="w-full bg-[#14102C] border border-emerald-500/50 rounded-xl px-4 py-3 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252] shadow-inner"
+                      value={ktalkSearchQuery}
+                      onChange={(e) => setKtalkSearchQuery(e.target.value)}
+                      placeholder="Поиск по названию, автору, комнате или дате..."
+                      className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#38BDF8]"
                     />
                   </div>
-                )}
 
-                <div>
-                  <label className="block text-xs font-bold text-white mb-1.5">
-                    3. Дисциплина / Предмет:
-                  </label>
-                  <input
-                    type="text"
-                    value={subject}
-                    onChange={(e) => setSubject(e.target.value)}
-                    placeholder="Олимпиадная математика"
-                    className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-2.5 text-xs text-white focus:outline-none focus:border-[#FF5252]"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-white mb-1.5">
-                    4. Группа / Параллель:
-                  </label>
-                  <input
-                    type="text"
-                    value={groupName}
-                    onChange={(e) => setGroupName(e.target.value)}
-                    placeholder="10-11 класс (Всеросс)"
-                    className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-2.5 text-xs text-white focus:outline-none focus:border-[#FF5252]"
-                  />
-                </div>
-              </div>
-
-              <div className="pt-2">
-                <button
-                  type="submit"
-                  disabled={isSubmittingTask}
-                  className="w-full py-3.5 bg-[#FF5252] hover:bg-[#ff3b3b] disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-[#FF5252]/30 flex items-center justify-center gap-2"
-                >
-                  {isSubmittingTask ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Play className="w-4 h-4 fill-white" />
-                  )}
-                  <span>Запустить автоматический аудит ИИ</span>
-                </button>
-              </div>
-            </form>
-
-            {/* Недавние проверки прямо под формой */}
-            {tasks.length > 0 && (
-              <div className="bg-[#1B153B] border border-indigo-800/50 rounded-3xl p-6 space-y-4 shadow-xl">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <FileText className="w-4 h-4 text-[#FF5252]" />
-                    <span>Последние отправленные занятия ({tasks.slice(0, 5).length})</span>
-                  </h3>
-                  <button
-                    onClick={() => setActiveTab('dashboard')}
-                    className="text-xs text-[#FF5252] hover:text-white font-semibold transition-colors flex items-center gap-1"
-                  >
-                    <span>Перейти в полный дашборд</span>
-                    <ChevronRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-
-                <div className="space-y-2.5">
-                  {tasks.slice(0, 5).map((t) => (
-                    <div
-                      key={t.id}
-                      onClick={() => {
-                        setActiveTab('dashboard');
-                        setActiveDetailTask(t);
-                      }}
-                      className="bg-[#14102C] hover:bg-[#241E4F]/60 border border-indigo-900/40 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 transition-colors cursor-pointer group"
-                    >
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-white text-xs">{t.teacherName}</span>
-                          <span className="text-[10px] text-indigo-300 bg-indigo-900/40 px-2 py-0.5 rounded-full border border-indigo-700/30">
-                            {t.subject}
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-indigo-400 truncate max-w-md">
-                          {t.lectureUrl}
-                        </div>
+                  {showHiddenKtalk ? (
+                    isLoadingHiddenKtalk ? (
+                      <div className="py-12 text-center text-xs text-indigo-300 flex flex-col items-center gap-2">
+                        <Loader2 className="w-5 h-5 animate-spin text-[#38BDF8]" />
+                        <span>Загрузка скрытых встреч...</span>
                       </div>
-
-                      <div className="flex items-center gap-4 w-full sm:w-auto justify-between sm:justify-end">
-                        {t.status === 'completed' ? (
-                          <span className="px-3 py-1 rounded-xl font-mono font-bold text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                            {t.totalScore} / 100
-                          </span>
-                        ) : (
-                          <div className="space-y-1 w-32">
-                            <div className="flex items-center gap-1.5 text-[10px] text-[#38BDF8]">
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              <span>{t.progressPct}% • {t.status === 'downloading' ? 'Загрузка...' : t.status === 'extracting' ? 'Нарезка...' : 'ИИ-анализ...'}</span>
+                    ) : hiddenRecordings.length === 0 ? (
+                      <div className="py-10 px-4 text-center bg-[#14102C]/70 border border-indigo-900/50 rounded-2xl space-y-2">
+                        <EyeOff className="w-6 h-6 text-indigo-400/70 mx-auto" />
+                        <div className="text-xs font-bold text-white">Скрытых встреч нет</div>
+                        <p className="text-[11px] text-indigo-300/80 max-w-sm mx-auto">
+                          Здесь отображаются встречи, отмеченные кнопкой «Скрыть / Не лекция». При необходимости любую из них можно вернуть обратно.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="max-h-[680px] overflow-y-auto space-y-2.5 pr-1">
+                        {hiddenRecordings.map((rec) => {
+                          const isRestoring = restoringRecordingKey === rec.recordingKey;
+                          return (
+                            <div
+                              key={rec.recordingKey}
+                              className="rounded-2xl p-4 border bg-[#14102C] border-indigo-900/60 space-y-2"
+                            >
+                              <div className="font-bold text-white text-sm leading-snug">
+                                {rec.title || `Встреча ${rec.recordingKey}`}
+                              </div>
+                              <div className="text-[11px] text-indigo-300 font-mono tabular-nums">
+                                {formatKtalkDateTime(rec.createdDate)} {rec.duration ? `· ${rec.duration}` : ''}
+                              </div>
+                              <div className="pt-1.5 border-t border-indigo-900/50 flex items-center justify-between gap-2">
+                                <span className="text-[11px] text-indigo-400 font-mono truncate">{rec.authorName || 'Автор не указан'}</span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleRestoreKtalkRecording(e, rec)}
+                                  disabled={isRestoring}
+                                  className="px-3 py-1.5 bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-400/40 text-white rounded-lg text-[11px] font-semibold inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                                >
+                                  <RotateCcw className={`w-3 h-3 ${isRestoring ? 'animate-spin' : ''}`} />
+                                  <span>Вернуть в список</span>
+                                </button>
+                              </div>
                             </div>
-                            <div className="w-full bg-indigo-950 h-1.5 rounded-full overflow-hidden">
-                              <div
-                                className="bg-[#38BDF8] h-full transition-all duration-500"
-                                style={{ width: `${t.progressPct}%` }}
-                              ></div>
+                          );
+                        })}
+                      </div>
+                    )
+                  ) : isLoadingKtalk && unreviewedRecordings.length === 0 ? (
+                    <div className="py-12 text-center text-xs text-indigo-300 flex flex-col items-center gap-2">
+                      <Loader2 className="w-5 h-5 animate-spin text-[#38BDF8]" />
+                      <span>Загрузка записей Контур.Толк...</span>
+                    </div>
+                  ) : filteredUnreviewed.length === 0 ? (
+                    <div className="py-10 px-4 text-center bg-[#14102C]/70 border border-indigo-900/50 rounded-2xl space-y-2">
+                      <Video className="w-6 h-6 text-indigo-400/70 mx-auto" />
+                      <div className="text-xs font-bold text-white">
+                        {unreviewedRecordings.length === 0
+                          ? 'Новых непроверенных встреч пока нет'
+                          : 'Ничего не найдено по вашему запросу'}
+                      </div>
+                      <p className="text-[11px] text-indigo-300/80 max-w-sm mx-auto leading-relaxed">
+                        {unreviewedRecordings.length === 0
+                          ? 'Все синхронизированные записи уже отправлены на проверку или скрыты. Нажмите «Обновить список» или введите ссылку вручную справа.'
+                          : 'Попробуйте изменить строку поиска или сбросить фильтр.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="max-h-[680px] overflow-y-auto space-y-2.5 pr-1">
+                      {filteredUnreviewed.map((rec) => {
+                        const isSelected = selectedKtalkRecording?.recordingKey === rec.recordingKey;
+                        const isHiding = hidingRecordingKey === rec.recordingKey;
+                        return (
+                          <div
+                            key={rec.recordingKey}
+                            onClick={() => handleSelectKtalkRecording(rec)}
+                            className={`rounded-2xl p-4 border transition-all cursor-pointer space-y-2.5 ${
+                              isSelected
+                                ? 'bg-[#241E4F] border-[#38BDF8] shadow-lg shadow-[#38BDF8]/10'
+                                : 'bg-[#14102C] border-indigo-900/60 hover:border-indigo-500/70 hover:bg-[#1E1843]'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="font-bold text-white text-sm leading-snug">
+                                {rec.title || `Встреча ${rec.recordingKey}`}
+                              </div>
+                              {isSelected && (
+                                <span className="text-[11px] font-bold text-[#38BDF8] shrink-0">
+                                  Выбрана
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-indigo-200/90 font-mono tabular-nums">
+                              <span>{formatKtalkDateTime(rec.createdDate)}</span>
+                              {rec.duration && (
+                                <>
+                                  <span className="text-indigo-500">·</span>
+                                  <span>{rec.duration}</span>
+                                </>
+                              )}
+                              {rec.resolutions && rec.resolutions.length > 0 && (
+                                <>
+                                  <span className="text-indigo-500">·</span>
+                                  <span>{rec.resolutions.join(', ')}</span>
+                                </>
+                              )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-indigo-200">
+                              <span>
+                                Ведущий: <strong className="text-white font-semibold">{rec.authorName || 'Не указан'}</strong>
+                              </span>
+                              {(rec.authorEmail || rec.authorLogin) && (
+                                <>
+                                  <span className="text-indigo-500">·</span>
+                                  <span className="font-mono text-[11px] text-indigo-300">
+                                    {rec.authorEmail || rec.authorLogin}
+                                  </span>
+                                </>
+                              )}
+                              {rec.roomName && (
+                                <>
+                                  <span className="text-indigo-500">·</span>
+                                  <span className="text-indigo-300">Комната: {rec.roomName}</span>
+                                </>
+                              )}
+                            </div>
+
+                            <div className="text-[11px] font-mono text-[#38BDF8]/80 truncate">
+                              {rec.lectureUrl}
+                            </div>
+
+                            <div className="pt-1.5 border-t border-indigo-900/50 flex items-center justify-between gap-2">
+                              <span className="text-xs font-semibold text-[#38BDF8]">
+                                {isSelected ? 'Ссылка подставлена в форму →' : 'Выбрать для проверки →'}
+                              </span>
+
+                              <button
+                                type="button"
+                                onClick={(e) => handleHideKtalkRecording(e, rec)}
+                                disabled={isHiding}
+                                className="px-2.5 py-1.5 bg-[#1B153B] hover:bg-rose-950/50 border border-indigo-800/60 hover:border-rose-500/40 text-indigo-300 hover:text-rose-200 rounded-lg text-[11px] font-medium transition-colors inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                                title="Скрыть встречу, если это внутренний созвон или тест"
+                              >
+                                {isHiding ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <EyeOff className="w-3 h-3" />
+                                )}
+                                <span>Скрыть / Не лекция</span>
+                              </button>
                             </div>
                           </div>
-                        )}
-                        <span className="text-xs text-[#FF5252] group-hover:text-white font-semibold flex items-center gap-0.5">
-                          <span>Карточка</span>
-                          <ChevronRight className="w-3.5 h-3.5" />
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* ПРАВАЯ КОЛОНКА: СПРАВОЧНАЯ КАРТОЧКА + РУЧНАЯ ФОРМА ОТПРАВКИ */}
+                <div className="lg:col-span-6 space-y-5">
+                  {selectedKtalkRecording && (
+                    <div className="bg-[#1B153B] border border-[#38BDF8]/50 rounded-3xl p-5 space-y-3 shadow-xl">
+                      <div className="flex items-start justify-between gap-3 border-b border-indigo-900/50 pb-3">
+                        <div>
+                          <div className="text-[11px] font-bold uppercase tracking-wider text-[#38BDF8]">
+                            Справка из Контур.Толк для ручного заполнения
+                          </div>
+                          <h3 className="text-sm font-black text-white mt-0.5">
+                            {selectedKtalkRecording.title || 'Выбранная встреча'}
+                          </h3>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedKtalkRecording(null);
+                            if (lectureUrl.trim() === selectedKtalkRecording.lectureUrl.trim()) {
+                              setLectureUrl('');
+                            }
+                          }}
+                          className="p-1.5 text-indigo-300 hover:text-white hover:bg-indigo-900/50 rounded-lg transition-colors cursor-pointer"
+                          title="Сбросить выбор встречи"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                        <div className="space-y-0.5">
+                          <div className="text-[11px] text-indigo-400 flex items-center gap-1">
+                            <Calendar className="w-3 h-3" />
+                            <span>Дата и время</span>
+                          </div>
+                          <div className="font-mono tabular-nums text-white font-semibold">
+                            {formatKtalkDateTime(selectedKtalkRecording.createdDate)}
+                          </div>
+                        </div>
+
+                        <div className="space-y-0.5">
+                          <div className="text-[11px] text-indigo-400 flex items-center gap-1">
+                            <Clock className="w-3 h-3" />
+                            <span>Длительность</span>
+                          </div>
+                          <div className="font-mono tabular-nums text-white font-semibold">
+                            {selectedKtalkRecording.duration || 'Не указана'}
+                          </div>
+                        </div>
+
+                        <div className="space-y-0.5">
+                          <div className="text-[11px] text-indigo-400 flex items-center gap-1">
+                            <User className="w-3 h-3" />
+                            <span>Автор / Организатор в КТалк</span>
+                          </div>
+                          <div className="text-white font-semibold">
+                            {selectedKtalkRecording.authorName || 'Не указан'}
+                          </div>
+                          {(selectedKtalkRecording.authorEmail || selectedKtalkRecording.authorLogin) && (
+                            <div className="font-mono text-[11px] text-indigo-300">
+                              {[selectedKtalkRecording.authorLogin, selectedKtalkRecording.authorEmail]
+                                .filter(Boolean)
+                                .join(' · ')}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="space-y-0.5">
+                          <div className="text-[11px] text-indigo-400">Комната и ключ записи</div>
+                          <div className="text-white font-semibold">
+                            {selectedKtalkRecording.roomName || 'Общее пространство'}
+                          </div>
+                          <div className="font-mono text-[11px] text-indigo-300">
+                            ID: {selectedKtalkRecording.recordingKey}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="pt-2 border-t border-indigo-900/50 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                        <span className="text-indigo-300">
+                          Преподавателя, предмет и группу выберите вручную ниже.
                         </span>
+                        <a
+                          href={selectedKtalkRecording.lectureUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[#38BDF8] hover:underline font-semibold inline-flex items-center gap-1"
+                        >
+                          <Link2 className="w-3 h-3" />
+                          <span>Открыть запись в КТалк</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
                       </div>
                     </div>
-                  ))}
+                  )}
+
+                  {submitError && (
+                    <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-200 space-y-3 shadow-lg">
+                      <div className="flex items-start gap-2.5">
+                        <AlertTriangle className="w-5 h-5 shrink-0 text-amber-400 mt-0.5" />
+                        <div className="space-y-1">
+                          <div className="font-bold text-amber-300 text-sm">
+                            {duplicateErrorTask ? 'Ссылка уже проверялась ранее!' : 'Ошибка отправки формы'}
+                          </div>
+                          <p className="text-xs text-indigo-200/90 leading-relaxed">{submitError}</p>
+                        </div>
+                      </div>
+
+                      {duplicateErrorTask && (
+                        <div className="bg-[#14102C] border border-amber-500/30 rounded-xl p-3.5 space-y-2.5 mt-2">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                            <div>
+                              <span className="text-indigo-400">Преподаватель: </span>
+                              <strong className="text-white">{duplicateErrorTask.teacherName}</strong>
+                            </div>
+                            <div>
+                              <span className="text-indigo-400">Дата проверки: </span>
+                              <span className="text-indigo-200 font-mono">{duplicateErrorTask.date}</span>
+                            </div>
+                            <div>
+                              <span className="text-indigo-400">Предмет: </span>
+                              <span className="text-indigo-200">{duplicateErrorTask.subject}</span>
+                            </div>
+                            <div>
+                              <span className="text-indigo-400">Оценка ИИ: </span>
+                              <strong className="text-emerald-400 font-mono">
+                                {typeof duplicateErrorTask.totalScore === 'number'
+                                  ? `${duplicateErrorTask.totalScore} / 100`
+                                  : 'В обработке'}
+                              </strong>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveTab('dashboard');
+                              setActiveDetailTask(duplicateErrorTask);
+                            }}
+                            className="mt-1 w-full py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <Search className="w-3.5 h-3.5" />
+                            <span>Открыть существующий результат проверки</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {submitSuccessTask && (
+                    <div className="p-5 bg-emerald-500/10 border border-emerald-500/30 rounded-3xl space-y-3">
+                      <div className="flex items-center gap-2 text-emerald-300 font-bold text-sm">
+                        <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                        <span>Заявка #{submitSuccessTask.id} поставлена в очередь!</span>
+                      </div>
+                      <p className="text-xs text-indigo-200">
+                        {submitSuccessMessage || 'Анализ поставлен в очередь FIFO и будет выполнен последовательно. Отслеживайте прогресс во вкладке «Дашборд преподавателей».'}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTab('dashboard');
+                          if (submitSuccessTask.status === 'completed') {
+                            setActiveDetailTask(submitSuccessTask);
+                          }
+                        }}
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <span>Перейти в дашборд</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleSubmitLecture} className="bg-[#1B153B] border border-indigo-800/50 rounded-3xl p-6 space-y-5 shadow-xl">
+                    <div>
+                      <label className="block text-xs font-bold text-white mb-1.5">
+                        1. Ссылка на запись встречи КТалк:
+                      </label>
+                      <input
+                        type="url"
+                        value={lectureUrl}
+                        onChange={(e) => {
+                          setLectureUrl(e.target.value);
+                          if (selectedKtalkRecording && e.target.value.trim() !== selectedKtalkRecording.lectureUrl.trim()) {
+                            setSelectedKtalkRecording(null);
+                          }
+                        }}
+                        placeholder="https://company.ktalk.ru/recordings/abc-123-xyz"
+                        required
+                        className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-3 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252] transition-colors font-mono"
+                      />
+                      <span className="text-[10px] text-indigo-400 mt-1 block">
+                        Выберите встречу слева или вставьте ссылку формата /recordings/ или /records/ вручную
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
+                          <GraduationCap className="w-3.5 h-3.5 text-[#FF5252]" />
+                          <span>2. Преподаватель:</span>
+                        </label>
+                        <div className="relative">
+                          <select
+                            value={selectedTeacher}
+                            onChange={(e) => {
+                              setSelectedTeacher(e.target.value);
+                              if (e.target.value !== '__new__') {
+                                setNewTeacherName('');
+                              }
+                            }}
+                            required
+                            className="w-full bg-[#14102C] border border-indigo-700/60 hover:border-indigo-500 rounded-xl px-3.5 py-3 text-xs text-white focus:outline-none focus:border-[#FF5252] transition-colors appearance-none cursor-pointer pr-8 shadow-inner"
+                          >
+                            <option value="" disabled className="bg-[#14102C] text-indigo-400">
+                              Выберите преподавателя...
+                            </option>
+                            {teachersList.map((t) => (
+                              <option key={t} value={t} className="bg-[#14102C] text-white py-1">
+                                {t}
+                              </option>
+                            ))}
+                            <option value="__new__" className="bg-[#1B153B] text-[#FF5252] font-bold py-1">
+                              + Добавить нового преподавателя...
+                            </option>
+                          </select>
+                          <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-indigo-400">
+                            ▼
+                          </div>
+                        </div>
+                      </div>
+
+                      {selectedTeacher === '__new__' && (
+                        <div className="animate-fade-in">
+                          <label className="block text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
+                            <UserPlus className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>ФИО нового преподавателя:</span>
+                          </label>
+                          <input
+                            type="text"
+                            value={newTeacherName}
+                            onChange={(e) => setNewTeacherName(e.target.value)}
+                            placeholder="Например: Иван Петров"
+                            required
+                            className="w-full bg-[#14102C] border border-emerald-500/50 rounded-xl px-4 py-3 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252] shadow-inner"
+                          />
+                        </div>
+                      )}
+
+                      <div>
+                        <label className="block text-xs font-bold text-white mb-1.5">
+                          3. Дисциплина / Предмет:
+                        </label>
+                        <input
+                          type="text"
+                          value={subject}
+                          onChange={(e) => setSubject(e.target.value)}
+                          placeholder="Например: Олимпиадная математика"
+                          required
+                          className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-2.5 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-white mb-1.5">
+                          4. Группа / Параллель:
+                        </label>
+                        <input
+                          type="text"
+                          value={groupName}
+                          onChange={(e) => setGroupName(e.target.value)}
+                          placeholder="Например: 10-11 класс (Всеросс)"
+                          required
+                          className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-2.5 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252]"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="pt-2">
+                      <button
+                        type="submit"
+                        disabled={isSubmittingTask}
+                        className="w-full py-3.5 bg-[#FF5252] hover:bg-[#ff3b3b] disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-[#FF5252]/30 flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        {isSubmittingTask ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Play className="w-4 h-4 fill-white" />
+                        )}
+                        <span>Запустить автоматический аудит ИИ</span>
+                      </button>
+                    </div>
+                  </form>
                 </div>
               </div>
-            )}
-          </div>
-        )}
+
+              {/* Недавние проверки внизу на всю ширину */}
+              {tasks.length > 0 && (
+                <div className="bg-[#1B153B] border border-indigo-800/50 rounded-3xl p-6 space-y-4 shadow-xl">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <FileText className="w-4 h-4 text-[#FF5252]" />
+                      <span>Последние отправленные занятия ({tasks.slice(0, 5).length})</span>
+                    </h3>
+                    <button
+                      onClick={() => setActiveTab('dashboard')}
+                      className="text-xs text-[#FF5252] hover:text-white font-semibold transition-colors flex items-center gap-1"
+                    >
+                      <span>Перейти в полный дашборд</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-2.5">
+                    {tasks.slice(0, 5).map((t) => (
+                      <div
+                        key={t.id}
+                        onClick={() => {
+                          setActiveTab('dashboard');
+                          if (t.status === 'completed') {
+                            setActiveDetailTask(t);
+                          } else if (t.isCorrupted) {
+                            setRawJsonModalTask(t);
+                          }
+                        }}
+                        className="bg-[#14102C] hover:bg-[#241E4F]/60 border border-indigo-900/40 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 transition-colors cursor-pointer group"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-white text-xs">{t.teacherName}</span>
+                            <span className="text-[10px] text-indigo-300 bg-indigo-900/40 px-2 py-0.5 rounded-full border border-indigo-700/30">
+                              {t.subject}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-indigo-400 truncate max-w-md">
+                            {t.lectureUrl}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-4 w-full sm:w-auto justify-between sm:justify-end">
+                          {t.status === 'completed' && !t.isCorrupted && typeof t.totalScore === 'number' ? (
+                            <span className="px-3 py-1 rounded-xl font-mono font-bold text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                              {t.totalScore} / 100
+                            </span>
+                          ) : t.status === 'failed' || t.isCorrupted ? (
+                            <span className="px-3 py-1 rounded-xl font-semibold text-xs bg-rose-500/20 text-rose-300 border border-rose-500/30 inline-flex items-center gap-1.5">
+                              <AlertTriangle className="w-3 h-3" />
+                              {t.isCorrupted ? 'Сбой JSON' : 'Ошибка'}
+                            </span>
+                          ) : t.status === 'pending' ? (
+                            <span className="px-3 py-1 rounded-xl font-semibold text-xs bg-indigo-500/15 text-indigo-200 border border-indigo-400/30 inline-flex items-center gap-1.5">
+                              <Clock className="w-3 h-3 text-cyan-400" />
+                              <span>В очереди {t.queuePosition ? `#${t.queuePosition}` : ''}</span>
+                            </span>
+                          ) : (
+                            <div className="space-y-1 w-32">
+                              <div className="flex items-center gap-1.5 text-[10px] text-[#38BDF8]">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                <span>
+                                  {t.progressPct}% • {t.status === 'downloading' ? 'Загрузка...' : t.status === 'extracting' ? 'Нарезка...' : t.status === 'uploading' ? 'Выгрузка...' : 'ИИ-анализ...'}
+                                </span>
+                              </div>
+                              <div className="w-full bg-indigo-950 h-1.5 rounded-full overflow-hidden">
+                                <div
+                                  className="bg-[#38BDF8] h-full transition-all duration-500"
+                                  style={{ width: `${t.progressPct}%` }}
+                                ></div>
+                              </div>
+                            </div>
+                          )}
+                          <span className="text-xs text-[#FF5252] group-hover:text-white font-semibold flex items-center gap-0.5">
+                            <span>{t.status === 'completed' && !t.isCorrupted ? 'Карточка' : 'Дашборд'}</span>
+                            <ChevronRight className="w-3.5 h-3.5" />
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* ======================================================== */}
         {/* ВКЛАДКА 3: УПРАВЛЕНИЕ КУРАТОРАМИ (SENIOR CURATOR ONLY)    */}
@@ -1672,14 +2437,39 @@ export default function App() {
                           )}
 
                           {c.email !== currentUser.email && c.email !== 'shurygin.egor2009@gmail.com' && (
-                            <button
-                              onClick={() => handleDeleteCurator(c.email)}
-                              className="px-2.5 py-1.5 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-500/30 text-rose-300 hover:text-rose-100 rounded-lg text-xs transition-colors inline-flex items-center gap-1"
-                              title="Удалить из белого списка"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                              <span>Удалить</span>
-                            </button>
+                            <>
+                              <button
+                                onClick={() =>
+                                  handleToggleStatus(c.email, c.status === 'active' ? 'blocked' : 'active')
+                                }
+                                className={`px-2.5 py-1.5 rounded-lg text-xs border transition-colors inline-flex items-center gap-1 cursor-pointer ${
+                                  c.status === 'active'
+                                    ? 'bg-amber-950/40 hover:bg-amber-900/60 border-amber-500/30 text-amber-300'
+                                    : 'bg-emerald-950/40 hover:bg-emerald-900/60 border-emerald-500/30 text-emerald-300'
+                                }`}
+                                title={c.status === 'active' ? 'Заблокировать доступ' : 'Разблокировать доступ'}
+                              >
+                                {c.status === 'active' ? (
+                                  <>
+                                    <Ban className="w-3.5 h-3.5" />
+                                    <span>Блок</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <CheckCircle className="w-3.5 h-3.5" />
+                                    <span>Разблок</span>
+                                  </>
+                                )}
+                              </button>
+                              <button
+                                onClick={() => setConfirmDeleteCuratorEmail(c.email)}
+                                className="px-2.5 py-1.5 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-500/30 text-rose-300 hover:text-rose-100 rounded-lg text-xs transition-colors inline-flex items-center gap-1 cursor-pointer"
+                                title="Удалить из белого списка"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>Удалить</span>
+                              </button>
+                            </>
                           )}
                         </td>
                       </tr>
@@ -1880,6 +2670,7 @@ export default function App() {
             token={authToken}
             userEmail={currentUser.email}
             isSeniorCurator={isSenior}
+            onConfigUpdated={fetchCriteriaConfig}
           />
         )}
 
@@ -1952,10 +2743,10 @@ export default function App() {
               <div className="border-b border-rose-500/20 pb-3">
                 <h3 className="text-base font-bold text-white flex items-center gap-2">
                   <AlertTriangle className="w-5 h-5 text-rose-400" />
-                  <span>{dynamicCriticalCriteria.length} критических нарушений (Обнуление оценки урока)</span>
+                  <span>{dynamicCriticalCriteria.length} критических нарушений методического контроля</span>
                 </h3>
                 <p className="text-xs text-rose-200/80 mt-0.5">
-                  При выявлении хотя бы одного из этих пунктов оценка за всё занятие снижается до 0 баллов
+                  При выявлении хотя бы одного из этих пунктов фиксируется критический флаг в карточке проверки и отчётах с обязательными таймкодами (реальный процентный балл по критериям сохраняется без искажения)
                 </p>
               </div>
 
@@ -2068,13 +2859,26 @@ export default function App() {
               <div className="flex items-center gap-4">
                 <div className="text-right">
                   <div className="text-[10px] text-indigo-300 font-medium">Оценка урока</div>
-                  <div className="text-2xl font-black font-mono text-emerald-400">
-                    {activeDetailTask.totalScore} <span className="text-xs text-indigo-300">/ 100</span>
+                  <div className="text-2xl font-black font-mono text-emerald-400 tabular-nums">
+                    {typeof activeDetailTask.totalScore === 'number' ? (
+                      <>
+                        {activeDetailTask.totalScore} <span className="text-xs text-indigo-300">/ 100</span>
+                      </>
+                    ) : (
+                      <span className="text-indigo-400">—</span>
+                    )}
                   </div>
+                  {typeof activeDetailTask.earnedPoints === 'number' &&
+                    typeof activeDetailTask.maxPoints === 'number' &&
+                    typeof activeDetailTask.applicableCount === 'number' && (
+                      <div className="text-[10px] font-mono text-indigo-300 mt-0.5 tabular-nums">
+                        {activeDetailTask.earnedPoints}/{activeDetailTask.maxPoints} балл. · учтено {activeDetailTask.applicableCount} из {activeDetailTask.criteria?.length || activeDetailTask.applicableCount}
+                      </div>
+                    )}
                 </div>
                 <button
                   onClick={() => setActiveDetailTask(null)}
-                  className="p-2 hover:bg-white/10 rounded-xl text-indigo-300 hover:text-white transition-colors"
+                  className="p-2 hover:bg-white/10 rounded-xl text-indigo-300 hover:text-white transition-colors cursor-pointer"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -2083,6 +2887,23 @@ export default function App() {
 
             {/* Контент модалки */}
             <div className="p-6 space-y-6 overflow-y-auto flex-1">
+              {/* Критические нарушения (если зафиксированы) */}
+              {Array.isArray(activeDetailTask.criticalViolations) && activeDetailTask.criticalViolations.length > 0 && (
+                <div className="p-4 bg-rose-500/15 border border-rose-500/50 rounded-2xl space-y-2">
+                  <div className="flex items-center gap-2 text-rose-300 font-bold text-xs uppercase tracking-wider">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                    <span>Зафиксированы критические нарушения ({activeDetailTask.criticalViolations.length})</span>
+                  </div>
+                  <ul className="space-y-1.5 text-xs text-rose-100">
+                    {activeDetailTask.criticalViolations.map((cv: string, idx: number) => (
+                      <li key={idx} className="p-2.5 bg-[#14102C]/80 rounded-xl border border-rose-500/30">
+                        {cv}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {/* Метаданные встречи КТалк (извлеченные через KTalk API) */}
               {activeDetailTask.talkMetadata && (
                 <div className="bg-[#14102C] border border-[#38BDF8]/40 rounded-2xl p-4 space-y-3 shadow-md">
@@ -2175,7 +2996,7 @@ export default function App() {
                 </div>
               )}
 
-              {/* Детализация по критериям */}
+              {/* Детализация по критериям (поддержка Н/П без искажения суммы) */}
               {activeDetailTask.criteria && activeDetailTask.criteria.length > 0 && (
                 <div className="space-y-3">
                   <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-1.5">
@@ -2183,30 +3004,69 @@ export default function App() {
                     Оценки по критериям качества:
                   </h4>
                   <div className="space-y-2">
-                    {activeDetailTask.criteria.map((c: any) => (
+                    {activeDetailTask.criteria.map((c: any) => {
+                      const isNA = Boolean(c.notApplicable) || c.score === null || c.score === undefined;
+                      const penaltyVal =
+                        typeof c.penaltyScore === 'number'
+                          ? c.penaltyScore
+                          : c.score === 5
+                          ? 0
+                          : c.score === 3
+                          ? 1
+                          : 2;
+
+                      let badgeLabel = '';
+                      if (isNA) {
+                        badgeLabel = reportSettings.naBadgeText || 'Н/П';
+                      } else if (reportSettings.displayMode === 'penalty') {
+                        badgeLabel = penaltyVal === 0 ? 'Штраф: 0' : `Штраф: -${penaltyVal}`;
+                      } else if (reportSettings.displayMode === 'status_only') {
+                        badgeLabel =
+                          penaltyVal === 0
+                            ? 'Выполнено'
+                            : penaltyVal === 1
+                            ? 'Частичное нарушение'
+                            : 'Грубое нарушение';
+                      } else {
+                        badgeLabel = `${c.score} / 5`;
+                      }
+
+                      return (
                       <div
                         key={c.id}
                         className={`p-3.5 rounded-xl border text-xs space-y-2 ${
-                          c.passed
+                          isNA
+                            ? 'bg-[#120E27] border-indigo-700/30 opacity-90'
+                            : c.passed
                             ? 'bg-[#14102C] border-indigo-900/60'
                             : 'bg-amber-950/20 border-amber-500/40'
                         }`}
                       >
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-3">
                           <span className="font-bold text-white flex items-center gap-2">
-                            <span className="text-[10px] font-mono bg-indigo-800/40 text-indigo-200 px-1.5 py-0.5 rounded">
+                            <span className="text-[10px] font-mono bg-indigo-800/40 text-indigo-200 px-1.5 py-0.5 rounded shrink-0">
                               #{c.id}
                             </span>
                             <span>{c.text}</span>
                           </span>
                           <span
-                            className={`font-mono font-bold px-2 py-0.5 rounded ${
-                              c.passed ? 'text-emerald-300 bg-emerald-500/20' : 'text-amber-300 bg-amber-500/20'
+                            className={`font-mono font-bold px-2 py-0.5 rounded shrink-0 ${
+                              isNA
+                                ? 'text-indigo-200 bg-indigo-500/20 border border-indigo-400/30'
+                                : c.passed
+                                ? 'text-emerald-300 bg-emerald-500/20'
+                                : 'text-amber-300 bg-amber-500/20'
                             }`}
                           >
-                            {c.score} / 5
+                            {badgeLabel}
                           </span>
                         </div>
+
+                        {isNA && (
+                          <div className="text-[11px] text-indigo-300/90 italic">
+                            {c.comment || reportSettings.naDescription}
+                          </div>
+                        )}
 
                         {/* Таймкоды нарушений */}
                         {c.timecodes && c.timecodes.length > 0 && (
@@ -2234,13 +3094,14 @@ export default function App() {
                         )}
 
                         {/* Разбор и комментарий методиста */}
-                        {c.comment && (
+                        {!isNA && c.comment && (
                           <div className="text-[11px] text-slate-300 leading-relaxed pt-0.5">
                             {c.comment}
                           </div>
                         )}
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -2333,15 +3194,61 @@ export default function App() {
             </div>
 
             {/* Подвал модалки */}
-            <div className="p-4 border-t border-indigo-900/60 bg-[#14102C]/60 flex items-center justify-between">
+            <div className="p-4 border-t border-indigo-900/60 bg-[#14102C]/60 flex items-center justify-between gap-3">
               <span className="text-[10px] text-indigo-400 font-mono">
                 Дата создания задачи: {rawJsonModalTask.date}
               </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={(e) => handleRetryTask(e, rawJsonModalTask.id)}
+                  disabled={retryingTaskId === rawJsonModalTask.id}
+                  className="px-4 py-2 bg-[#FF5252] hover:bg-[#ff3b3b] disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RotateCcw className={`w-3.5 h-3.5 ${retryingTaskId === rawJsonModalTask.id ? 'animate-spin' : ''}`} />
+                  <span>Повторить проверку</span>
+                </button>
+                <button
+                  onClick={() => setRawJsonModalTask(null)}
+                  className="px-5 py-2 bg-indigo-800 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer"
+                >
+                  Закрыть
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ВНУТРИПРОГРАММНОЕ МОДАЛЬНОЕ ОКНО ПОДТВЕРЖДЕНИЯ УДАЛЕНИЯ КУРАТОРА */}
+      {confirmDeleteCuratorEmail && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#1B153B] border border-rose-500/40 rounded-2xl max-w-sm w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-400 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Удаление куратора</h3>
+                <p className="text-xs text-indigo-300 mt-0.5 break-all">
+                  Удалить <strong className="text-white">{confirmDeleteCuratorEmail}</strong> из белого списка системы?
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3 pt-2">
               <button
-                onClick={() => setRawJsonModalTask(null)}
-                className="px-5 py-2 bg-indigo-800 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-md"
+                type="button"
+                onClick={() => setConfirmDeleteCuratorEmail(null)}
+                className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl transition cursor-pointer"
               >
-                Закрыть
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={confirmAndDeleteCurator}
+                className="flex-1 py-2 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-xl transition cursor-pointer"
+              >
+                Удалить
               </button>
             </div>
           </div>

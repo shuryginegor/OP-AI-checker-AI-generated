@@ -26,7 +26,8 @@ class VideoAnalysisResponse(BaseModel):
 
 def get_json_output_prompt_instructions() -> str:
     """Динамически формирует инструкции по JSON-ответу в зависимости от количества некритических критериев."""
-    count = len(criteria.STANDARD_CRITERIA)
+    std_list, _ = criteria.get_dynamic_criteria()
+    count = len(std_list)
     return f"""
 Проведи детальный анализ по ВСЕМ некритическим критериям (всего их {count}) и выдай итоговый ответ СТРОГО в формате JSON со следующими ключами:
 {{
@@ -158,12 +159,29 @@ def parse_analysis_json(text_or_dict) -> dict:
 
     if isinstance(criteria_scores, list):
         for item in criteria_scores:
-            if isinstance(item, dict):
-                score = item.get("score")
-                if score is not None and isinstance(score, (int, float)):
-                    score_val = max(0, min(2, int(score)))
-                    deducted_scores.append(score_val)
-                    applicable_count += 1
+            if not isinstance(item, dict):
+                continue
+            score = item.get("score")
+            if isinstance(score, bool):
+                continue
+            if score is None:
+                continue
+            if isinstance(score, str):
+                s_low = score.strip().lower()
+                if s_low in ("", "null", "none", "н/п", "н/д", "n/a", "na", "не применим"):
+                    continue
+                try:
+                    score_int = int(float(s_low))
+                except (ValueError, TypeError):
+                    continue
+            elif isinstance(score, (int, float)):
+                score_int = int(score)
+            else:
+                continue
+
+            score_val = max(0, min(2, score_int))
+            deducted_scores.append(score_val)
+            applicable_count += 1
 
     total_deducted = sum(deducted_scores)
     point = total_deducted
@@ -173,25 +191,49 @@ def parse_analysis_json(text_or_dict) -> dict:
         earned_points = max(0, max_possible_points - point)
         final_percentage = round((earned_points / max_possible_points) * 100, 2)
     else:
-        logger.error(f"[parse_analysis_json] Массив критериев не найден или пуст в ответе модели!\nИсходные данные: {data}")
-        raise ValueError("Ответ модели не содержит валидного списка критериев оценки (criteria_scores пуст или отсутствует). Возможно, модель вернула текстовый отказ или ошибку.")
+        logger.error(f"[parse_analysis_json] Массив критериев не найден или не содержит применимых критериев!\nИсходные данные: {data}")
+        raise ValueError("Ответ модели не содержит валидного списка критериев оценки (criteria_scores пуст или все оценки некорректны).")
 
     is_critical = bool(data.get("is_critical", False))
-    critical_details = data.get("critical_details") or data.get("critical_violations") or []
-    
+    raw_crit = data.get("critical_details") or data.get("critical_violations") or []
+    if isinstance(raw_crit, str):
+        raw_crit = [raw_crit] if raw_crit.strip() and raw_crit.strip().lower() not in ("null", "none", "нет") else []
+    elif not isinstance(raw_crit, list):
+        raw_crit = []
+    critical_details = [
+        str(cd).strip()
+        for cd in raw_crit
+        if cd is not None and str(cd).strip() and str(cd).strip().lower() not in ("null", "none")
+    ]
+    if not critical_details:
+        is_critical = False
+
     comment = (
-        data.get("comment") or 
-        data.get("comments") or 
-        data.get("summary") or 
-        data.get("overall_comment") or 
+        data.get("comment") or
+        data.get("comments") or
+        data.get("summary") or
+        data.get("overall_comment") or
         "Обработка завершена."
     )
-    recommendations = (
-        data.get("recommendations") or 
-        data.get("recommendation") or 
-        data.get("advice") or 
+    raw_recs = (
+        data.get("recommendations") or
+        data.get("recommendation") or
+        data.get("advice") or
         ""
     )
+    clean_recs: List[str] = []
+    if isinstance(raw_recs, list):
+        for r in raw_recs:
+            s = re.sub(r"^\s*[-*•\d.)]+\s*", "", str(r or "")).strip()
+            if s and s.lower() not in ("null", "none"):
+                clean_recs.append(s)
+    elif isinstance(raw_recs, str):
+        for line in raw_recs.split("\n"):
+            s = re.sub(r"^\s*[-*•]+\s*", "", line).strip()
+            if s and s.lower() not in ("null", "none"):
+                clean_recs.append(s)
+
+    recommendations_str = "\n".join(clean_recs) if clean_recs else ""
 
     return {
         "point": point,
@@ -203,7 +245,8 @@ def parse_analysis_json(text_or_dict) -> dict:
         "critical_details": critical_details,
         "criteria_scores": criteria_scores,
         "comment": str(comment).strip(),
-        "recommendations": str(recommendations).strip(),
+        "recommendations": recommendations_str,
+        "recommendations_list": clean_recs,
         "raw_json": data
     }
 
@@ -259,11 +302,12 @@ async def send_long_message(bot, chat_id: int, text: str, parse_mode: str = "HTM
 
 async def save_and_notify_success(bot, tg_id: int, db_id: int, mark: dict, provider_name: str, frames_count: Optional[int] = None):
     """Записывает результаты работы нейросети в БД и отправляет пользователю наглядное подробное резюме без сырого JSON."""
+    std_list, _ = criteria.get_dynamic_criteria()
     point = mark.get("point", 0)
     applicable_count = mark.get("applicable_count", 0)
     max_possible_points = mark.get("max_possible_points")
     if not max_possible_points or max_possible_points == 0:
-        max_possible_points = 2 * (applicable_count if applicable_count > 0 else len(criteria.STANDARD_CRITERIA))
+        max_possible_points = 2 * (applicable_count if applicable_count > 0 else len(std_list))
     earned_points = mark.get("earned_points", max(0, max_possible_points - point))
     final_percentage = round(float(mark.get("final_percentage", 100.0)), 2)
 
@@ -290,16 +334,24 @@ async def save_and_notify_success(bot, tg_id: int, db_id: int, mark: dict, provi
                 c_name_short = c_name.split(". ")[-1] if ". " in c_name else c_name
                 if len(c_name_short) > 65:
                     c_name_short = c_name_short[:62] + "..."
-                
+
                 score = item.get("score")
                 details = str(item.get("details", "")).strip()
 
-                if score is None:
+                is_null_score = (
+                    score is None
+                    or isinstance(score, bool)
+                    or (isinstance(score, str) and score.strip().lower() in ("", "null", "none", "н/п", "н/д", "n/a", "na", "не применим"))
+                )
+                is_deducted = False
+
+                if is_null_score:
                     icon = "⚪"
-                    score_str = "н/д (не применим)"
+                    score_str = "Н/П (не применим)"
                 else:
                     try:
-                        score_int = int(score)
+                        score_int = int(float(score))
+                        is_deducted = score_int > 0
                         if score_int == 0:
                             icon = "🟢"
                             score_str = "0 б. (без нарушений)"
@@ -311,18 +363,10 @@ async def save_and_notify_success(bot, tg_id: int, db_id: int, mark: dict, provi
                             score_str = "-2 б. (грубое нарушение)"
                     except (ValueError, TypeError):
                         icon = "⚪"
-                        score_str = "н/д"
-                
+                        score_str = "Н/П (не применим)"
+                        is_null_score = True
+
                 line = f"{icon} <b>Критерий {c_id}:</b> <code>{score_str}</code> — <i>{html.escape(c_name_short)}</i>"
-                is_deducted = False
-                if score is not None:
-                    try:
-                        is_deducted = int(score) > 0
-                    except (ValueError, TypeError):
-                        pass
-
-                is_null_score = (score is None) or (isinstance(score, str) and score.lower() in ("null", "none"))
-
                 if details and (is_deducted or is_null_score):
                     line += f"\n   └ 💬 {html.escape(details)}"
                 criteria_summary_lines.append(line)
@@ -350,7 +394,8 @@ async def save_and_notify_success(bot, tg_id: int, db_id: int, mark: dict, provi
     # Итоговое подробное оформление в Telegram в формате HTML
     result_text = (
         f"📊 <b>Анализ занятия завершен ({provider_name})!</b>\n\n"
-        f"🎯 <b>ИТОГОВАЯ ОЦЕНКА КАЧЕСТВА:</b> <code>{final_percentage:.2f}%</code> (<code>{earned_points}</code> из <code>{max_possible_points}</code> баллов)\n"
+        f"🎯 <b>ИТОГОВАЯ ОЦЕНКА КАЧЕСТВА:</b> <code>{final_percentage:.2f}%</code> "
+        f"(<code>{earned_points}</code> из <code>{max_possible_points}</code> баллов, применимо {applicable_count} крит.)\n"
         f"🔻 <b>Сумма штрафных баллов:</b> <code>{point}</code>\n"
         f"⚠️ <b>Критический статус:</b> {crit_text}"
         f"{frames_info}"
