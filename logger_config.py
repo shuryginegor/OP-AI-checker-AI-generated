@@ -24,7 +24,8 @@ def setup_logging(level=None):
     target_level = level or LOG_LEVEL
 
     # Настройка корневого логгера (вывод в консоль + сохранение в файл /tmp/bot.log)
-    handlers = [logging.StreamHandler(sys.stdout)]
+    stream_target = sys.stderr if os.getenv("PYTHON_LOG_TO_STDERR") == "1" else sys.stdout
+    handlers = [logging.StreamHandler(stream_target)]
     try:
         from logging.handlers import RotatingFileHandler
         handlers.append(RotatingFileHandler("/tmp/bot.log", maxBytes=10*1024*1024, backupCount=2, encoding="utf-8"))

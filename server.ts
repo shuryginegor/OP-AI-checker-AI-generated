@@ -886,9 +886,15 @@ async function startServer() {
 
       console.log(`[Python Pipeline] Запуск анализа через Python: ${taskId} (${teacherName})`);
 
-      const child = spawn("python3", args, {
+      const venvCandidates = [
+        path.join(process.cwd(), ".venv", "bin", "python3"),
+        "/opt/venv/bin/python3"
+      ];
+      const pythonBin = venvCandidates.find(p => fs.existsSync(p)) || "python3";
+
+      const child = spawn(pythonBin, args, {
         cwd: process.cwd(),
-        env: process.env,
+        env: { ...process.env, PYTHON_LOG_TO_STDERR: "1" },
         stdio: ["ignore", "pipe", "pipe"]
       });
 

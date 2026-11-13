@@ -263,6 +263,7 @@ export default function App() {
   const [ktalkSyncNotice, setKtalkSyncNotice] = useState<string>('');
   const [ktalkSearchQuery, setKtalkSearchQuery] = useState<string>('');
   const [selectedKtalkRecording, setSelectedKtalkRecording] = useState<KtalkRecordingItem | null>(null);
+  const [isCheckModalOpen, setIsCheckModalOpen] = useState<boolean>(false);
   const [hidingRecordingKey, setHidingRecordingKey] = useState<string | null>(null);
 
   // Управление кураторами (ТОЛЬКО ДЛЯ СТАРШИХ КУРАТОРОВ)
@@ -375,7 +376,7 @@ export default function App() {
           setKtalkSyncStatus(data.syncStatus);
         }
         setSelectedKtalkRecording(prev =>
-          prev ? list.find(r => r.recordingKey === prev.recordingKey) || null : null
+          prev ? list.find(r => r.recordingKey === prev.recordingKey) || prev : null
         );
       }
     } catch (e) {
@@ -402,7 +403,7 @@ export default function App() {
       if (Array.isArray(data.recordings)) {
         setUnreviewedRecordings(data.recordings);
         setSelectedKtalkRecording(prev =>
-          prev ? data.recordings.find((r: KtalkRecordingItem) => r.recordingKey === prev.recordingKey) || null : null
+          prev ? data.recordings.find((r: KtalkRecordingItem) => r.recordingKey === prev.recordingKey) || prev : null
         );
       }
       if (data.success) {
@@ -419,14 +420,34 @@ export default function App() {
     }
   };
 
-  // Выбор непроверенной встречи: подставляется ТОЛЬКО ссылка, все остальные поля куратор заполняет вручную
+  // Выбор непроверенной встречи: открывает модальное окно проверки и подставляет ТОЛЬКО ссылку
   const handleSelectKtalkRecording = (rec: KtalkRecordingItem) => {
     setSelectedKtalkRecording(rec);
     setLectureUrl(rec.lectureUrl);
+    setSelectedTeacher(teachersList.length === 0 ? '__new__' : '');
+    setNewTeacherName('');
+    setSubject('');
+    setGroupName('');
     setSubmitError('');
     setDuplicateErrorTask(null);
     setSubmitSuccessTask(null);
     setSubmitSuccessMessage('');
+    setIsCheckModalOpen(true);
+  };
+
+  // Открытие окна для ручной вставки ссылки на лекцию КТалк
+  const openManualCheckModal = () => {
+    setSelectedKtalkRecording(null);
+    setLectureUrl('');
+    setSelectedTeacher(teachersList.length === 0 ? '__new__' : '');
+    setNewTeacherName('');
+    setSubject('');
+    setGroupName('');
+    setSubmitError('');
+    setDuplicateErrorTask(null);
+    setSubmitSuccessTask(null);
+    setSubmitSuccessMessage('');
+    setIsCheckModalOpen(true);
   };
 
   // Скрытие нецелевой встречи ("Скрыть / Не лекция")
@@ -1396,12 +1417,12 @@ export default function App() {
                         onClick={() => {
                           if (isCompletedValid) {
                             setActiveDetailTask(t);
-                          } else if (t.isCorrupted || t.rawBrokenResponse) {
+                          } else if (t.status === 'failed' || t.isCorrupted || t.rawBrokenResponse) {
                             setRawJsonModalTask(t);
                           }
                         }}
                         className={`transition-colors group ${
-                          isCompletedValid || t.isCorrupted || t.rawBrokenResponse
+                          isCompletedValid || t.status === 'failed' || t.isCorrupted || t.rawBrokenResponse
                             ? 'hover:bg-[#241E4F]/50 cursor-pointer'
                             : 'opacity-85 cursor-default'
                         }`}
@@ -1589,7 +1610,7 @@ export default function App() {
                             </div>
                             <p className="text-indigo-300/80 text-xs">
                               {tasks.length === 0
-                                ? 'В системе пока нет загруженных занятий. Перейдите во вкладку «Отправить встречу КТалк», чтобы запустить первый методический аудит.'
+                                ? 'В системе пока нет загруженных занятий. Перейдите во вкладку «Проверить встречу КТалк», чтобы запустить первый методический аудит.'
                                 : 'Попробуйте сбросить фильтр преподавателя или поисковый запрос.'}
                             </p>
                             {tasks.length === 0 && (
@@ -1642,85 +1663,95 @@ export default function App() {
                     Новые записи вебинаров и отправка на проверку
                   </h2>
                   <p className="text-xs text-indigo-200/80 leading-relaxed max-w-3xl">
-                    Выберите непроверенную встречу из списка слева — её ссылка подставится автоматически, а все метаданные (название, дата, время, длительность, ведущий) откроются для сверки. Преподавателя, предмет и группу укажите вручную перед отправкой в очередь GigaChat.
+                    Нажмите на любую непроверенную встречу — откроется окно отправки на проверку со всеми метаданными КТалк (название, дата, время, длительность, ведущий) и подставленной ссылкой. Преподавателя, предмет и группу заполните вручную перед отправкой в очередь GigaChat.
                   </p>
                 </div>
 
-                {ktalkSyncStatus?.configured && ktalkSyncStatus.domain && (
-                  <div className="text-xs text-indigo-200/90 shrink-0 lg:text-right space-y-0.5">
-                    <div className="text-[11px] text-indigo-300">Пространство КТалк</div>
-                    <div className="font-mono font-semibold text-white">{ktalkSyncStatus.domain.replace(/^https?:\/\//i, '')}</div>
-                  </div>
-                )}
+                <div className="flex flex-col sm:flex-row lg:flex-col items-start sm:items-center lg:items-end gap-3 shrink-0">
+                  {ktalkSyncStatus?.configured && ktalkSyncStatus.domain && (
+                    <div className="text-xs text-indigo-200/90 lg:text-right space-y-0.5">
+                      <div className="text-[11px] text-indigo-300">Пространство КТалк</div>
+                      <div className="font-mono font-semibold text-white">{ktalkSyncStatus.domain.replace(/^https?:\/\//i, '')}</div>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={openManualCheckModal}
+                    className="px-4 py-2.5 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-[#FF5252]/30 inline-flex items-center gap-2 cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Ввести ссылку вручную</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                {/* ЛЕВАЯ КОЛОНКА: СПИСОК НЕПРОВЕРЕННЫХ ВСТРЕЧ КОНТУР.ТОЛК */}
-                <div className="lg:col-span-6 bg-[#1B153B] border border-indigo-800/50 rounded-3xl p-5 space-y-4 shadow-xl">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                        <Video className="w-4 h-4 text-[#38BDF8]" />
-                        <span>Непроверенные встречи</span>
-                        <span className="font-mono tabular-nums text-xs text-[#38BDF8]">
-                          ({unreviewedRecordings.length})
-                        </span>
-                      </h3>
-                      <div className="text-[11px] text-indigo-300/80 mt-0.5 font-mono tabular-nums">
-                        {ktalkSyncStatus?.lastSyncedAt
-                          ? `Обновлено: ${formatKtalkDateTime(ktalkSyncStatus.lastSyncedAt)}`
-                          : 'Ожидание первой синхронизации'}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const next = !showHiddenKtalk;
-                          setShowHiddenKtalk(next);
-                          if (next) void fetchHiddenRecordings();
-                        }}
-                        className={`px-3 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
-                          showHiddenKtalk
-                            ? 'bg-indigo-600/40 border-[#38BDF8] text-white'
-                            : 'bg-[#14102C] hover:bg-[#241E4F] border-indigo-700/60 text-indigo-300 hover:text-white'
-                        }`}
-                      >
-                        {showHiddenKtalk ? 'К новым встречам' : 'Скрытые'}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={handleManualKtalkSync}
-                        disabled={isSyncingKtalk}
-                        className="px-3.5 py-2 bg-[#14102C] hover:bg-[#241E4F] border border-indigo-700/60 hover:border-[#38BDF8]/60 text-white rounded-xl text-xs font-semibold transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
-                      >
-                        <RefreshCw className={`w-3.5 h-3.5 text-[#38BDF8] ${isSyncingKtalk ? 'animate-spin' : ''}`} />
-                        <span>{isSyncingKtalk ? 'Обновление...' : 'Обновить список'}</span>
-                      </button>
+              {/* СПИСОК НЕПРОВЕРЕННЫХ / СКРЫТЫХ ВСТРЕЧ КОНТУР.ТОЛК */}
+              <div className="bg-[#1B153B] border border-indigo-800/50 rounded-3xl p-5 sm:p-6 space-y-4 shadow-xl">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Video className="w-4 h-4 text-[#38BDF8]" />
+                      <span>{showHiddenKtalk ? 'Скрытые встречи (не лекции)' : 'Непроверенные встречи'}</span>
+                      <span className="font-mono tabular-nums text-xs text-[#38BDF8]">
+                        ({showHiddenKtalk ? hiddenRecordings.length : unreviewedRecordings.length})
+                      </span>
+                    </h3>
+                    <div className="text-[11px] text-indigo-300/80 mt-0.5 font-mono tabular-nums">
+                      {ktalkSyncStatus?.lastSyncedAt
+                        ? `Обновлено: ${formatKtalkDateTime(ktalkSyncStatus.lastSyncedAt)}`
+                        : 'Ожидание первой синхронизации'}
                     </div>
                   </div>
 
-                  {ktalkSyncStatus && !ktalkSyncStatus.configured && (
-                    <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-200 leading-relaxed">
-                      Автоматическая загрузка встреч отключена: задайте параметры <code className="font-mono text-white bg-[#14102C] px-1.5 py-0.5 rounded">TALK_DOMAIN</code> и <code className="font-mono text-white bg-[#14102C] px-1.5 py-0.5 rounded">TALK_API_KEY</code> в файле <code className="font-mono text-white bg-[#14102C] px-1.5 py-0.5 rounded">.env</code> на сервере. Вы по-прежнему можете вставить ссылку вручную.
-                    </div>
-                  )}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = !showHiddenKtalk;
+                        setShowHiddenKtalk(next);
+                        if (next) void fetchHiddenRecordings();
+                      }}
+                      className={`px-3 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                        showHiddenKtalk
+                          ? 'bg-indigo-600/40 border-[#38BDF8] text-white'
+                          : 'bg-[#14102C] hover:bg-[#241E4F] border-indigo-700/60 text-indigo-300 hover:text-white'
+                      }`}
+                    >
+                      {showHiddenKtalk ? 'К новым встречам' : 'Скрытые'}
+                    </button>
 
-                  {ktalkSyncStatus?.lastError && ktalkSyncStatus.configured && (
-                    <div className="p-3.5 bg-rose-500/10 border border-rose-500/30 rounded-2xl text-xs text-rose-200 flex items-start gap-2">
-                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                      <span>{ktalkSyncStatus.lastError}</span>
-                    </div>
-                  )}
+                    <button
+                      type="button"
+                      onClick={handleManualKtalkSync}
+                      disabled={isSyncingKtalk}
+                      className="px-3.5 py-2 bg-[#14102C] hover:bg-[#241E4F] border border-indigo-700/60 hover:border-[#38BDF8]/60 text-white rounded-xl text-xs font-semibold transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 text-[#38BDF8] ${isSyncingKtalk ? 'animate-spin' : ''}`} />
+                      <span>{isSyncingKtalk ? 'Обновление...' : 'Обновить список'}</span>
+                    </button>
+                  </div>
+                </div>
 
-                  {ktalkSyncNotice && !ktalkSyncStatus?.lastError && (
-                    <div className="px-3.5 py-2 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-300">
-                      {ktalkSyncNotice}
-                    </div>
-                  )}
+                {ktalkSyncStatus && !ktalkSyncStatus.configured && (
+                  <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-200 leading-relaxed">
+                    Автоматическая загрузка встреч отключена: задайте параметры <code className="font-mono text-white bg-[#14102C] px-1.5 py-0.5 rounded">TALK_DOMAIN</code> и <code className="font-mono text-white bg-[#14102C] px-1.5 py-0.5 rounded">TALK_API_KEY</code> в файле <code className="font-mono text-white bg-[#14102C] px-1.5 py-0.5 rounded">.env</code> на сервере. Вы можете отправить лекцию по ссылке через кнопку «Ввести ссылку вручную».
+                  </div>
+                )}
 
+                {ktalkSyncStatus?.lastError && ktalkSyncStatus.configured && (
+                  <div className="p-3.5 bg-rose-500/10 border border-rose-500/30 rounded-2xl text-xs text-rose-200 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <span>{ktalkSyncStatus.lastError}</span>
+                  </div>
+                )}
+
+                {ktalkSyncNotice && !ktalkSyncStatus?.lastError && (
+                  <div className="px-3.5 py-2 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-300">
+                    {ktalkSyncNotice}
+                  </div>
+                )}
+
+                {!showHiddenKtalk && (
                   <div className="relative">
                     <Search className="w-3.5 h-3.5 text-indigo-400 absolute left-3.5 top-3" />
                     <input
@@ -1731,96 +1762,105 @@ export default function App() {
                       className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#38BDF8]"
                     />
                   </div>
+                )}
 
-                  {showHiddenKtalk ? (
-                    isLoadingHiddenKtalk ? (
-                      <div className="py-12 text-center text-xs text-indigo-300 flex flex-col items-center gap-2">
-                        <Loader2 className="w-5 h-5 animate-spin text-[#38BDF8]" />
-                        <span>Загрузка скрытых встреч...</span>
-                      </div>
-                    ) : hiddenRecordings.length === 0 ? (
-                      <div className="py-10 px-4 text-center bg-[#14102C]/70 border border-indigo-900/50 rounded-2xl space-y-2">
-                        <EyeOff className="w-6 h-6 text-indigo-400/70 mx-auto" />
-                        <div className="text-xs font-bold text-white">Скрытых встреч нет</div>
-                        <p className="text-[11px] text-indigo-300/80 max-w-sm mx-auto">
-                          Здесь отображаются встречи, отмеченные кнопкой «Скрыть / Не лекция». При необходимости любую из них можно вернуть обратно.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="max-h-[680px] overflow-y-auto space-y-2.5 pr-1">
-                        {hiddenRecordings.map((rec) => {
-                          const isRestoring = restoringRecordingKey === rec.recordingKey;
-                          return (
-                            <div
-                              key={rec.recordingKey}
-                              className="rounded-2xl p-4 border bg-[#14102C] border-indigo-900/60 space-y-2"
-                            >
+                {showHiddenKtalk ? (
+                  isLoadingHiddenKtalk ? (
+                    <div className="py-12 text-center text-xs text-indigo-300 flex flex-col items-center gap-2">
+                      <Loader2 className="w-5 h-5 animate-spin text-[#38BDF8]" />
+                      <span>Загрузка скрытых встреч...</span>
+                    </div>
+                  ) : hiddenRecordings.length === 0 ? (
+                    <div className="py-10 px-4 text-center bg-[#14102C]/70 border border-indigo-900/50 rounded-2xl space-y-2">
+                      <EyeOff className="w-6 h-6 text-indigo-400/70 mx-auto" />
+                      <div className="text-xs font-bold text-white">Скрытых встреч нет</div>
+                      <p className="text-[11px] text-indigo-300/80 max-w-sm mx-auto">
+                        Здесь отображаются встречи, отмеченные кнопкой «Скрыть / Не лекция». При необходимости любую из них можно вернуть обратно.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[680px] overflow-y-auto pr-1">
+                      {hiddenRecordings.map((rec) => {
+                        const isRestoring = restoringRecordingKey === rec.recordingKey;
+                        return (
+                          <div
+                            key={rec.recordingKey}
+                            className="rounded-2xl p-4 border bg-[#14102C] border-indigo-900/60 space-y-2 flex flex-col justify-between"
+                          >
+                            <div className="space-y-1.5">
                               <div className="font-bold text-white text-sm leading-snug">
                                 {rec.title || `Встреча ${rec.recordingKey}`}
                               </div>
                               <div className="text-[11px] text-indigo-300 font-mono tabular-nums">
                                 {formatKtalkDateTime(rec.createdDate)} {rec.duration ? `· ${rec.duration}` : ''}
                               </div>
-                              <div className="pt-1.5 border-t border-indigo-900/50 flex items-center justify-between gap-2">
-                                <span className="text-[11px] text-indigo-400 font-mono truncate">{rec.authorName || 'Автор не указан'}</span>
-                                <button
-                                  type="button"
-                                  onClick={(e) => handleRestoreKtalkRecording(e, rec)}
-                                  disabled={isRestoring}
-                                  className="px-3 py-1.5 bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-400/40 text-white rounded-lg text-[11px] font-semibold inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
-                                >
-                                  <RotateCcw className={`w-3 h-3 ${isRestoring ? 'animate-spin' : ''}`} />
-                                  <span>Вернуть в список</span>
-                                </button>
-                              </div>
                             </div>
-                          );
-                        })}
-                      </div>
-                    )
-                  ) : isLoadingKtalk && unreviewedRecordings.length === 0 ? (
-                    <div className="py-12 text-center text-xs text-indigo-300 flex flex-col items-center gap-2">
-                      <Loader2 className="w-5 h-5 animate-spin text-[#38BDF8]" />
-                      <span>Загрузка записей Контур.Толк...</span>
+                            <div className="pt-2 border-t border-indigo-900/50 flex items-center justify-between gap-2">
+                              <span className="text-[11px] text-indigo-400 font-mono truncate">{rec.authorName || 'Автор не указан'}</span>
+                              <button
+                                type="button"
+                                onClick={(e) => handleRestoreKtalkRecording(e, rec)}
+                                disabled={isRestoring}
+                                className="px-3 py-1.5 bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-400/40 text-white rounded-lg text-[11px] font-semibold inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shrink-0"
+                              >
+                                <RotateCcw className={`w-3 h-3 ${isRestoring ? 'animate-spin' : ''}`} />
+                                <span>Вернуть в список</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
-                  ) : filteredUnreviewed.length === 0 ? (
-                    <div className="py-10 px-4 text-center bg-[#14102C]/70 border border-indigo-900/50 rounded-2xl space-y-2">
-                      <Video className="w-6 h-6 text-indigo-400/70 mx-auto" />
-                      <div className="text-xs font-bold text-white">
-                        {unreviewedRecordings.length === 0
-                          ? 'Новых непроверенных встреч пока нет'
-                          : 'Ничего не найдено по вашему запросу'}
-                      </div>
-                      <p className="text-[11px] text-indigo-300/80 max-w-sm mx-auto leading-relaxed">
-                        {unreviewedRecordings.length === 0
-                          ? 'Все синхронизированные записи уже отправлены на проверку или скрыты. Нажмите «Обновить список» или введите ссылку вручную справа.'
-                          : 'Попробуйте изменить строку поиска или сбросить фильтр.'}
-                      </p>
+                  )
+                ) : isLoadingKtalk && unreviewedRecordings.length === 0 ? (
+                  <div className="py-12 text-center text-xs text-indigo-300 flex flex-col items-center gap-2">
+                    <Loader2 className="w-5 h-5 animate-spin text-[#38BDF8]" />
+                    <span>Загрузка записей Контур.Толк...</span>
+                  </div>
+                ) : filteredUnreviewed.length === 0 ? (
+                  <div className="py-10 px-4 text-center bg-[#14102C]/70 border border-indigo-900/50 rounded-2xl space-y-3">
+                    <Video className="w-6 h-6 text-indigo-400/70 mx-auto" />
+                    <div className="text-xs font-bold text-white">
+                      {unreviewedRecordings.length === 0
+                        ? 'Новых непроверенных встреч пока нет'
+                        : 'Ничего не найдено по вашему запросу'}
                     </div>
-                  ) : (
-                    <div className="max-h-[680px] overflow-y-auto space-y-2.5 pr-1">
-                      {filteredUnreviewed.map((rec) => {
-                        const isSelected = selectedKtalkRecording?.recordingKey === rec.recordingKey;
-                        const isHiding = hidingRecordingKey === rec.recordingKey;
-                        return (
-                          <div
-                            key={rec.recordingKey}
-                            onClick={() => handleSelectKtalkRecording(rec)}
-                            className={`rounded-2xl p-4 border transition-all cursor-pointer space-y-2.5 ${
-                              isSelected
-                                ? 'bg-[#241E4F] border-[#38BDF8] shadow-lg shadow-[#38BDF8]/10'
-                                : 'bg-[#14102C] border-indigo-900/60 hover:border-indigo-500/70 hover:bg-[#1E1843]'
-                            }`}
-                          >
+                    <p className="text-[11px] text-indigo-300/80 max-w-md mx-auto leading-relaxed">
+                      {unreviewedRecordings.length === 0
+                        ? 'Все синхронизированные записи уже отправлены на проверку или скрыты. Нажмите «Обновить список» или отправьте запись по ссылке вручную.'
+                        : 'Попробуйте изменить строку поиска или сбросить фильтр.'}
+                    </p>
+                    <div>
+                      <button
+                        type="button"
+                        onClick={openManualCheckModal}
+                        className="px-4 py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Ввести ссылку вручную</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[680px] overflow-y-auto pr-1">
+                    {filteredUnreviewed.map((rec) => {
+                      const isSelected = isCheckModalOpen && selectedKtalkRecording?.recordingKey === rec.recordingKey;
+                      const isHiding = hidingRecordingKey === rec.recordingKey;
+                      return (
+                        <div
+                          key={rec.recordingKey}
+                          onClick={() => handleSelectKtalkRecording(rec)}
+                          className={`rounded-2xl p-4 border transition-all cursor-pointer space-y-2.5 flex flex-col justify-between ${
+                            isSelected
+                              ? 'bg-[#241E4F] border-[#38BDF8] shadow-lg shadow-[#38BDF8]/10'
+                              : 'bg-[#14102C] border-indigo-900/60 hover:border-[#38BDF8]/70 hover:bg-[#1E1843]'
+                          }`}
+                        >
+                          <div className="space-y-2">
                             <div className="flex items-start justify-between gap-2">
                               <div className="font-bold text-white text-sm leading-snug">
                                 {rec.title || `Встреча ${rec.recordingKey}`}
                               </div>
-                              {isSelected && (
-                                <span className="text-[11px] font-bold text-[#38BDF8] shrink-0">
-                                  Выбрана
-                                </span>
-                              )}
                             </div>
 
                             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-indigo-200/90 font-mono tabular-nums">
@@ -1862,328 +1902,41 @@ export default function App() {
                             <div className="text-[11px] font-mono text-[#38BDF8]/80 truncate">
                               {rec.lectureUrl}
                             </div>
-
-                            <div className="pt-1.5 border-t border-indigo-900/50 flex items-center justify-between gap-2">
-                              <span className="text-xs font-semibold text-[#38BDF8]">
-                                {isSelected ? 'Ссылка подставлена в форму →' : 'Выбрать для проверки →'}
-                              </span>
-
-                              <button
-                                type="button"
-                                onClick={(e) => handleHideKtalkRecording(e, rec)}
-                                disabled={isHiding}
-                                className="px-2.5 py-1.5 bg-[#1B153B] hover:bg-rose-950/50 border border-indigo-800/60 hover:border-rose-500/40 text-indigo-300 hover:text-rose-200 rounded-lg text-[11px] font-medium transition-colors inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
-                                title="Скрыть встречу, если это внутренний созвон или тест"
-                              >
-                                {isHiding ? (
-                                  <Loader2 className="w-3 h-3 animate-spin" />
-                                ) : (
-                                  <EyeOff className="w-3 h-3" />
-                                )}
-                                <span>Скрыть / Не лекция</span>
-                              </button>
-                            </div>
                           </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
 
-                {/* ПРАВАЯ КОЛОНКА: СПРАВОЧНАЯ КАРТОЧКА + РУЧНАЯ ФОРМА ОТПРАВКИ */}
-                <div className="lg:col-span-6 space-y-5">
-                  {selectedKtalkRecording && (
-                    <div className="bg-[#1B153B] border border-[#38BDF8]/50 rounded-3xl p-5 space-y-3 shadow-xl">
-                      <div className="flex items-start justify-between gap-3 border-b border-indigo-900/50 pb-3">
-                        <div>
-                          <div className="text-[11px] font-bold uppercase tracking-wider text-[#38BDF8]">
-                            Справка из Контур.Толк для ручного заполнения
-                          </div>
-                          <h3 className="text-sm font-black text-white mt-0.5">
-                            {selectedKtalkRecording.title || 'Выбранная встреча'}
-                          </h3>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedKtalkRecording(null);
-                            if (lectureUrl.trim() === selectedKtalkRecording.lectureUrl.trim()) {
-                              setLectureUrl('');
-                            }
-                          }}
-                          className="p-1.5 text-indigo-300 hover:text-white hover:bg-indigo-900/50 rounded-lg transition-colors cursor-pointer"
-                          title="Сбросить выбор встречи"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      </div>
+                          <div className="pt-2 border-t border-indigo-900/50 flex items-center justify-between gap-2">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleSelectKtalkRecording(rec);
+                              }}
+                              className="px-3 py-1.5 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-lg text-xs font-bold transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <Play className="w-3 h-3 fill-white" />
+                              <span>Открыть для проверки</span>
+                            </button>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                        <div className="space-y-0.5">
-                          <div className="text-[11px] text-indigo-400 flex items-center gap-1">
-                            <Calendar className="w-3 h-3" />
-                            <span>Дата и время</span>
-                          </div>
-                          <div className="font-mono tabular-nums text-white font-semibold">
-                            {formatKtalkDateTime(selectedKtalkRecording.createdDate)}
+                            <button
+                              type="button"
+                              onClick={(e) => handleHideKtalkRecording(e, rec)}
+                              disabled={isHiding}
+                              className="px-2.5 py-1.5 bg-[#1B153B] hover:bg-rose-950/50 border border-indigo-800/60 hover:border-rose-500/40 text-indigo-300 hover:text-rose-200 rounded-lg text-[11px] font-medium transition-colors inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                              title="Скрыть встречу, если это внутренний созвон или тест"
+                            >
+                              {isHiding ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <EyeOff className="w-3 h-3" />
+                              )}
+                              <span>Скрыть / Не лекция</span>
+                            </button>
                           </div>
                         </div>
-
-                        <div className="space-y-0.5">
-                          <div className="text-[11px] text-indigo-400 flex items-center gap-1">
-                            <Clock className="w-3 h-3" />
-                            <span>Длительность</span>
-                          </div>
-                          <div className="font-mono tabular-nums text-white font-semibold">
-                            {selectedKtalkRecording.duration || 'Не указана'}
-                          </div>
-                        </div>
-
-                        <div className="space-y-0.5">
-                          <div className="text-[11px] text-indigo-400 flex items-center gap-1">
-                            <User className="w-3 h-3" />
-                            <span>Автор / Организатор в КТалк</span>
-                          </div>
-                          <div className="text-white font-semibold">
-                            {selectedKtalkRecording.authorName || 'Не указан'}
-                          </div>
-                          {(selectedKtalkRecording.authorEmail || selectedKtalkRecording.authorLogin) && (
-                            <div className="font-mono text-[11px] text-indigo-300">
-                              {[selectedKtalkRecording.authorLogin, selectedKtalkRecording.authorEmail]
-                                .filter(Boolean)
-                                .join(' · ')}
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="space-y-0.5">
-                          <div className="text-[11px] text-indigo-400">Комната и ключ записи</div>
-                          <div className="text-white font-semibold">
-                            {selectedKtalkRecording.roomName || 'Общее пространство'}
-                          </div>
-                          <div className="font-mono text-[11px] text-indigo-300">
-                            ID: {selectedKtalkRecording.recordingKey}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="pt-2 border-t border-indigo-900/50 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                        <span className="text-indigo-300">
-                          Преподавателя, предмет и группу выберите вручную ниже.
-                        </span>
-                        <a
-                          href={selectedKtalkRecording.lectureUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-[#38BDF8] hover:underline font-semibold inline-flex items-center gap-1"
-                        >
-                          <Link2 className="w-3 h-3" />
-                          <span>Открыть запись в КТалк</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      </div>
-                    </div>
-                  )}
-
-                  {submitError && (
-                    <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-200 space-y-3 shadow-lg">
-                      <div className="flex items-start gap-2.5">
-                        <AlertTriangle className="w-5 h-5 shrink-0 text-amber-400 mt-0.5" />
-                        <div className="space-y-1">
-                          <div className="font-bold text-amber-300 text-sm">
-                            {duplicateErrorTask ? 'Ссылка уже проверялась ранее!' : 'Ошибка отправки формы'}
-                          </div>
-                          <p className="text-xs text-indigo-200/90 leading-relaxed">{submitError}</p>
-                        </div>
-                      </div>
-
-                      {duplicateErrorTask && (
-                        <div className="bg-[#14102C] border border-amber-500/30 rounded-xl p-3.5 space-y-2.5 mt-2">
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
-                            <div>
-                              <span className="text-indigo-400">Преподаватель: </span>
-                              <strong className="text-white">{duplicateErrorTask.teacherName}</strong>
-                            </div>
-                            <div>
-                              <span className="text-indigo-400">Дата проверки: </span>
-                              <span className="text-indigo-200 font-mono">{duplicateErrorTask.date}</span>
-                            </div>
-                            <div>
-                              <span className="text-indigo-400">Предмет: </span>
-                              <span className="text-indigo-200">{duplicateErrorTask.subject}</span>
-                            </div>
-                            <div>
-                              <span className="text-indigo-400">Оценка ИИ: </span>
-                              <strong className="text-emerald-400 font-mono">
-                                {typeof duplicateErrorTask.totalScore === 'number'
-                                  ? `${duplicateErrorTask.totalScore} / 100`
-                                  : 'В обработке'}
-                              </strong>
-                            </div>
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setActiveTab('dashboard');
-                              setActiveDetailTask(duplicateErrorTask);
-                            }}
-                            className="mt-1 w-full py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            <Search className="w-3.5 h-3.5" />
-                            <span>Открыть существующий результат проверки</span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {submitSuccessTask && (
-                    <div className="p-5 bg-emerald-500/10 border border-emerald-500/30 rounded-3xl space-y-3">
-                      <div className="flex items-center gap-2 text-emerald-300 font-bold text-sm">
-                        <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                        <span>Заявка #{submitSuccessTask.id} поставлена в очередь!</span>
-                      </div>
-                      <p className="text-xs text-indigo-200">
-                        {submitSuccessMessage || 'Анализ поставлен в очередь FIFO и будет выполнен последовательно. Отслеживайте прогресс во вкладке «Дашборд преподавателей».'}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setActiveTab('dashboard');
-                          if (submitSuccessTask.status === 'completed') {
-                            setActiveDetailTask(submitSuccessTask);
-                          }
-                        }}
-                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <span>Перейти в дашборд</span>
-                        <ChevronRight className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  )}
-
-                  <form onSubmit={handleSubmitLecture} className="bg-[#1B153B] border border-indigo-800/50 rounded-3xl p-6 space-y-5 shadow-xl">
-                    <div>
-                      <label className="block text-xs font-bold text-white mb-1.5">
-                        1. Ссылка на запись встречи КТалк:
-                      </label>
-                      <input
-                        type="url"
-                        value={lectureUrl}
-                        onChange={(e) => {
-                          setLectureUrl(e.target.value);
-                          if (selectedKtalkRecording && e.target.value.trim() !== selectedKtalkRecording.lectureUrl.trim()) {
-                            setSelectedKtalkRecording(null);
-                          }
-                        }}
-                        placeholder="https://company.ktalk.ru/recordings/abc-123-xyz"
-                        required
-                        className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-3 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252] transition-colors font-mono"
-                      />
-                      <span className="text-[10px] text-indigo-400 mt-1 block">
-                        Выберите встречу слева или вставьте ссылку формата /recordings/ или /records/ вручную
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
-                          <GraduationCap className="w-3.5 h-3.5 text-[#FF5252]" />
-                          <span>2. Преподаватель:</span>
-                        </label>
-                        <div className="relative">
-                          <select
-                            value={selectedTeacher}
-                            onChange={(e) => {
-                              setSelectedTeacher(e.target.value);
-                              if (e.target.value !== '__new__') {
-                                setNewTeacherName('');
-                              }
-                            }}
-                            required
-                            className="w-full bg-[#14102C] border border-indigo-700/60 hover:border-indigo-500 rounded-xl px-3.5 py-3 text-xs text-white focus:outline-none focus:border-[#FF5252] transition-colors appearance-none cursor-pointer pr-8 shadow-inner"
-                          >
-                            <option value="" disabled className="bg-[#14102C] text-indigo-400">
-                              Выберите преподавателя...
-                            </option>
-                            {teachersList.map((t) => (
-                              <option key={t} value={t} className="bg-[#14102C] text-white py-1">
-                                {t}
-                              </option>
-                            ))}
-                            <option value="__new__" className="bg-[#1B153B] text-[#FF5252] font-bold py-1">
-                              + Добавить нового преподавателя...
-                            </option>
-                          </select>
-                          <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-indigo-400">
-                            ▼
-                          </div>
-                        </div>
-                      </div>
-
-                      {selectedTeacher === '__new__' && (
-                        <div className="animate-fade-in">
-                          <label className="block text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
-                            <UserPlus className="w-3.5 h-3.5 text-emerald-400" />
-                            <span>ФИО нового преподавателя:</span>
-                          </label>
-                          <input
-                            type="text"
-                            value={newTeacherName}
-                            onChange={(e) => setNewTeacherName(e.target.value)}
-                            placeholder="Например: Иван Петров"
-                            required
-                            className="w-full bg-[#14102C] border border-emerald-500/50 rounded-xl px-4 py-3 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252] shadow-inner"
-                          />
-                        </div>
-                      )}
-
-                      <div>
-                        <label className="block text-xs font-bold text-white mb-1.5">
-                          3. Дисциплина / Предмет:
-                        </label>
-                        <input
-                          type="text"
-                          value={subject}
-                          onChange={(e) => setSubject(e.target.value)}
-                          placeholder="Например: Олимпиадная математика"
-                          required
-                          className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-2.5 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252]"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-bold text-white mb-1.5">
-                          4. Группа / Параллель:
-                        </label>
-                        <input
-                          type="text"
-                          value={groupName}
-                          onChange={(e) => setGroupName(e.target.value)}
-                          placeholder="Например: 10-11 класс (Всеросс)"
-                          required
-                          className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-2.5 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252]"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="pt-2">
-                      <button
-                        type="submit"
-                        disabled={isSubmittingTask}
-                        className="w-full py-3.5 bg-[#FF5252] hover:bg-[#ff3b3b] disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-[#FF5252]/30 flex items-center justify-center gap-2 cursor-pointer"
-                      >
-                        {isSubmittingTask ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <Play className="w-4 h-4 fill-white" />
-                        )}
-                        <span>Запустить автоматический аудит ИИ</span>
-                      </button>
-                    </div>
-                  </form>
-                </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* Недавние проверки внизу на всю ширину */}
@@ -2209,9 +1962,9 @@ export default function App() {
                         key={t.id}
                         onClick={() => {
                           setActiveTab('dashboard');
-                          if (t.status === 'completed') {
+                          if (t.status === 'completed' && !t.isCorrupted) {
                             setActiveDetailTask(t);
-                          } else if (t.isCorrupted) {
+                          } else if (t.status === 'failed' || t.isCorrupted || t.rawBrokenResponse) {
                             setRawJsonModalTask(t);
                           }
                         }}
@@ -3120,7 +2873,7 @@ export default function App() {
         </div>
       )}
 
-      {/* МОДАЛЬНОЕ ОКНО СЫРОГО ПОЛОМАННОГО JSON ОТ ИИ */}
+      {/* МОДАЛЬНОЕ ОКНО СЫРОГО ОТВЕТА / ОШИБКИ ПРОВЕРКИ */}
       {rawJsonModalTask && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-[#1B153B] border border-amber-500/50 rounded-3xl max-w-3xl w-full max-h-[90vh] flex flex-col shadow-2xl animate-fade-in overflow-hidden">
@@ -3133,18 +2886,18 @@ export default function App() {
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full">
-                      Разбор поврежден • Сбой JSON
+                      {rawJsonModalTask.isCorrupted ? 'Разбор поврежден • Сбой JSON' : 'Ошибка выполнения проверки'}
                     </span>
                     <span className="text-xs text-indigo-400 font-mono">#{rawJsonModalTask.id}</span>
                   </div>
                   <h3 className="text-base font-black text-white mt-0.5">
-                    Сырой ответ нейросети GigaChat ({rawJsonModalTask.teacherName})
+                    {rawJsonModalTask.teacherName} • {rawJsonModalTask.subject}
                   </h3>
                 </div>
               </div>
               <button
                 onClick={() => setRawJsonModalTask(null)}
-                className="p-2 hover:bg-white/10 rounded-xl text-indigo-300 hover:text-white transition-colors"
+                className="p-2 hover:bg-white/10 rounded-xl text-indigo-300 hover:text-white transition-colors cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -3152,45 +2905,63 @@ export default function App() {
 
             {/* Контент модалки */}
             <div className="p-6 space-y-4 overflow-y-auto flex-1 text-xs">
-              <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-amber-200 leading-relaxed space-y-1">
-                <div className="font-bold text-amber-300 flex items-center gap-1.5">
-                  <AlertTriangle className="w-4 h-4 text-amber-400" />
-                  <span>Автоматическое восстановление JSON структуры не удалось</span>
+              {rawJsonModalTask.errorMessage && (
+                <div className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-2xl text-rose-200 leading-relaxed space-y-1">
+                  <div className="font-bold text-rose-300">Причина остановки проверки:</div>
+                  <p className="text-xs text-rose-100">{rawJsonModalTask.errorMessage}</p>
                 </div>
-                <p className="text-[11px] text-indigo-200">
-                  Модель GigaChat вернула ответ, содержащий синтаксические повреждения или отказ безопасности, который встроенный парсер не смог привести к валидной схеме. Вы можете просмотреть или скопировать полный оригинальный ответ ниже:
-                </p>
-              </div>
+              )}
 
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-mono text-indigo-300">Оригинальный сырой текст ответа модели:</span>
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(rawJsonModalTask.rawBrokenResponse || 'Пустой ответ');
-                      setCopiedRawJson(true);
-                      setTimeout(() => setCopiedRawJson(false), 2000);
-                    }}
-                    className="px-3 py-1 bg-[#14102C] hover:bg-indigo-900/60 border border-indigo-700/50 text-[#38BDF8] rounded-lg text-xs font-semibold transition-all inline-flex items-center gap-1.5"
-                  >
-                    {copiedRawJson ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        <span className="text-emerald-400">Скопировано!</span>
-                      </>
-                    ) : (
-                      <>
-                        <FileText className="w-3.5 h-3.5" />
-                        <span>Скопировать сырой ответ</span>
-                      </>
-                    )}
-                  </button>
+              {rawJsonModalTask.isCorrupted && (
+                <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-amber-200 leading-relaxed space-y-1">
+                  <div className="font-bold text-amber-300 flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-400" />
+                    <span>Автоматическое восстановление JSON структуры не удалось</span>
+                  </div>
+                  <p className="text-[11px] text-indigo-200">
+                    Модель GigaChat вернула ответ, содержащий синтаксические повреждения или отказ безопасности, который встроенный парсер не смог привести к валидной схеме.
+                  </p>
                 </div>
+              )}
 
-                <pre className="bg-[#100D24] text-emerald-300 border border-indigo-950 p-4 rounded-2xl font-mono text-xs overflow-x-auto max-h-[50vh] whitespace-pre-wrap select-all leading-relaxed shadow-inner">
-                  {rawJsonModalTask.rawBrokenResponse || 'Ответ пуст или не был получен от сервиса.'}
-                </pre>
-              </div>
+              {rawJsonModalTask.rawBrokenResponse ? (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono text-indigo-300">
+                      Оригинальный сырой текст ответа модели:
+                    </span>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(rawJsonModalTask.rawBrokenResponse || '');
+                        setCopiedRawJson(true);
+                        setTimeout(() => setCopiedRawJson(false), 2000);
+                      }}
+                      className="px-3 py-1 bg-[#14102C] hover:bg-indigo-900/60 border border-indigo-700/50 text-[#38BDF8] rounded-lg text-xs font-semibold transition-all inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {copiedRawJson ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="text-emerald-400">Скопировано!</span>
+                        </>
+                      ) : (
+                        <>
+                          <FileText className="w-3.5 h-3.5" />
+                          <span>Скопировать сырой ответ</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <pre className="bg-[#100D24] text-emerald-300 border border-indigo-950 p-4 rounded-2xl font-mono text-xs overflow-x-auto max-h-[50vh] whitespace-pre-wrap select-all leading-relaxed shadow-inner">
+                    {rawJsonModalTask.rawBrokenResponse}
+                  </pre>
+                </div>
+              ) : (
+                <div className="p-3.5 bg-[#14102C] border border-indigo-900/60 rounded-2xl space-y-1.5 text-[11px] text-indigo-200">
+                  <div className="font-semibold text-indigo-300">Ссылка на запись:</div>
+                  <div className="font-mono text-[#38BDF8] break-all">{rawJsonModalTask.lectureUrl || 'Не указана'}</div>
+                </div>
+              )}
             </div>
 
             {/* Подвал модалки */}
@@ -3215,6 +2986,325 @@ export default function App() {
                   Закрыть
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* МОДАЛЬНОЕ ОКНО ДЛЯ ПРОВЕРКИ ЛЕКЦИИ (ПО КЛИКУ НА КАРТОЧКУ КТАЛК ИЛИ РУЧНОМУ ВВОДУ) */}
+      {isCheckModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setIsCheckModalOpen(false)}
+        >
+          <div
+            className="bg-[#1B153B] border border-indigo-700/60 rounded-3xl max-w-2xl w-full max-h-[92vh] flex flex-col shadow-2xl animate-fade-in overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Шапка модалки */}
+            <div className="p-5 sm:p-6 border-b border-indigo-900/60 flex items-start justify-between gap-3 bg-[#14102C]/70">
+              <div>
+                <div className="text-[11px] font-bold uppercase tracking-wider text-[#38BDF8]">
+                  {selectedKtalkRecording ? 'Отправка выбранной встречи КТалк' : 'Ручная отправка встречи КТалк'}
+                </div>
+                <h3 className="text-lg font-black text-white mt-0.5">
+                  {selectedKtalkRecording?.title || 'Окно запуска методической проверки'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCheckModalOpen(false)}
+                className="p-2 hover:bg-white/10 rounded-xl text-indigo-300 hover:text-white transition-colors cursor-pointer"
+                title="Закрыть окно"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Контент модалки */}
+            <div className="p-5 sm:p-6 space-y-5 overflow-y-auto flex-1">
+              {selectedKtalkRecording && (
+                <div className="bg-[#14102C] border border-[#38BDF8]/40 rounded-2xl p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-2 border-b border-indigo-900/50 pb-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#38BDF8]">
+                      Метаданные встречи из Контур.Толк
+                    </span>
+                    <a
+                      href={selectedKtalkRecording.lectureUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] text-[#38BDF8] hover:underline font-semibold inline-flex items-center gap-1"
+                    >
+                      <Link2 className="w-3 h-3" />
+                      <span>Открыть запись в КТалк</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div className="space-y-0.5">
+                      <div className="text-[11px] text-indigo-400 flex items-center gap-1">
+                        <Calendar className="w-3 h-3" />
+                        <span>Дата и время</span>
+                      </div>
+                      <div className="font-mono tabular-nums text-white font-semibold">
+                        {formatKtalkDateTime(selectedKtalkRecording.createdDate)}
+                      </div>
+                    </div>
+
+                    <div className="space-y-0.5">
+                      <div className="text-[11px] text-indigo-400 flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        <span>Длительность</span>
+                      </div>
+                      <div className="font-mono tabular-nums text-white font-semibold">
+                        {selectedKtalkRecording.duration || 'Не указана'}
+                      </div>
+                    </div>
+
+                    <div className="space-y-0.5">
+                      <div className="text-[11px] text-indigo-400 flex items-center gap-1">
+                        <User className="w-3 h-3" />
+                        <span>Ведущий / Организатор</span>
+                      </div>
+                      <div className="text-white font-semibold">
+                        {selectedKtalkRecording.authorName || 'Не указан'}
+                      </div>
+                      {(selectedKtalkRecording.authorEmail || selectedKtalkRecording.authorLogin) && (
+                        <div className="font-mono text-[11px] text-indigo-300">
+                          {[selectedKtalkRecording.authorLogin, selectedKtalkRecording.authorEmail]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-0.5">
+                      <div className="text-[11px] text-indigo-400">Комната и ключ записи</div>
+                      <div className="text-white font-semibold">
+                        {selectedKtalkRecording.roomName || 'Общее пространство'}
+                      </div>
+                      <div className="font-mono text-[11px] text-indigo-300 truncate" title={selectedKtalkRecording.recordingKey}>
+                        ID: {selectedKtalkRecording.recordingKey}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {submitError && (
+                <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-200 space-y-3">
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="w-5 h-5 shrink-0 text-amber-400 mt-0.5" />
+                    <div className="space-y-1">
+                      <div className="font-bold text-amber-300 text-sm">
+                        {duplicateErrorTask ? 'Ссылка уже проверялась ранее!' : 'Ошибка отправки формы'}
+                      </div>
+                      <p className="text-xs text-indigo-200/90 leading-relaxed">{submitError}</p>
+                    </div>
+                  </div>
+
+                  {duplicateErrorTask && (
+                    <div className="bg-[#14102C] border border-amber-500/30 rounded-xl p-3.5 space-y-2.5 mt-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                        <div>
+                          <span className="text-indigo-400">Преподаватель: </span>
+                          <strong className="text-white">{duplicateErrorTask.teacherName}</strong>
+                        </div>
+                        <div>
+                          <span className="text-indigo-400">Дата проверки: </span>
+                          <span className="text-indigo-200 font-mono">{duplicateErrorTask.date}</span>
+                        </div>
+                        <div>
+                          <span className="text-indigo-400">Предмет: </span>
+                          <span className="text-indigo-200">{duplicateErrorTask.subject}</span>
+                        </div>
+                        <div>
+                          <span className="text-indigo-400">Оценка ИИ: </span>
+                          <strong className="text-emerald-400 font-mono">
+                            {typeof duplicateErrorTask.totalScore === 'number'
+                              ? `${duplicateErrorTask.totalScore} / 100`
+                              : 'В обработке'}
+                          </strong>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsCheckModalOpen(false);
+                          setActiveTab('dashboard');
+                          setActiveDetailTask(duplicateErrorTask);
+                        }}
+                        className="mt-1 w-full py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Search className="w-3.5 h-3.5" />
+                        <span>Открыть существующий результат проверки</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {submitSuccessTask ? (
+                <div className="p-5 bg-emerald-500/10 border border-emerald-500/30 rounded-2xl space-y-4">
+                  <div className="flex items-center gap-2 text-emerald-300 font-bold text-sm">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                    <span>Заявка #{submitSuccessTask.id} поставлена в очередь!</span>
+                  </div>
+                  <p className="text-xs text-indigo-200 leading-relaxed">
+                    {submitSuccessMessage || 'Анализ поставлен в очередь FIFO и будет выполнен последовательно. Встреча убрана из списка непроверенных.'}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsCheckModalOpen(false);
+                        setActiveTab('dashboard');
+                        if (submitSuccessTask.status === 'completed' && !submitSuccessTask.isCorrupted) {
+                          setActiveDetailTask(submitSuccessTask);
+                        }
+                      }}
+                      className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <span>Перейти в дашборд</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsCheckModalOpen(false)}
+                      className="px-4 py-2.5 bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 hover:text-white rounded-xl text-xs font-semibold transition-all cursor-pointer"
+                    >
+                      Остаться в списке встреч
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <form onSubmit={handleSubmitLecture} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-white mb-1.5">
+                      1. Ссылка на запись встречи КТалк:
+                    </label>
+                    <input
+                      type="url"
+                      value={lectureUrl}
+                      onChange={(e) => {
+                        setLectureUrl(e.target.value);
+                        if (selectedKtalkRecording && e.target.value.trim() !== selectedKtalkRecording.lectureUrl.trim()) {
+                          setSelectedKtalkRecording(null);
+                        }
+                      }}
+                      placeholder="https://company.ktalk.ru/recordings/abc-123-xyz"
+                      required
+                      className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-3 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252] transition-colors font-mono"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
+                        <GraduationCap className="w-3.5 h-3.5 text-[#FF5252]" />
+                        <span>2. Преподаватель:</span>
+                      </label>
+                      <div className="relative">
+                        <select
+                          value={selectedTeacher}
+                          onChange={(e) => {
+                            setSelectedTeacher(e.target.value);
+                            if (e.target.value !== '__new__') {
+                              setNewTeacherName('');
+                            }
+                          }}
+                          required
+                          className="w-full bg-[#14102C] border border-indigo-700/60 hover:border-indigo-500 rounded-xl px-3.5 py-3 text-xs text-white focus:outline-none focus:border-[#FF5252] transition-colors appearance-none cursor-pointer pr-8 shadow-inner"
+                        >
+                          <option value="" disabled className="bg-[#14102C] text-indigo-400">
+                            Выберите преподавателя...
+                          </option>
+                          {teachersList.map((t) => (
+                            <option key={t} value={t} className="bg-[#14102C] text-white py-1">
+                              {t}
+                            </option>
+                          ))}
+                          <option value="__new__" className="bg-[#1B153B] text-[#FF5252] font-bold py-1">
+                            + Добавить нового преподавателя...
+                          </option>
+                        </select>
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-indigo-400">
+                          ▼
+                        </div>
+                      </div>
+                    </div>
+
+                    {selectedTeacher === '__new__' && (
+                      <div className="animate-fade-in">
+                        <label className="block text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
+                          <UserPlus className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>ФИО нового преподавателя:</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={newTeacherName}
+                          onChange={(e) => setNewTeacherName(e.target.value)}
+                          placeholder="Например: Иван Петров"
+                          required
+                          className="w-full bg-[#14102C] border border-emerald-500/50 rounded-xl px-4 py-3 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252] shadow-inner"
+                        />
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="block text-xs font-bold text-white mb-1.5">
+                        3. Дисциплина / Предмет:
+                      </label>
+                      <input
+                        type="text"
+                        value={subject}
+                        onChange={(e) => setSubject(e.target.value)}
+                        placeholder="Например: Олимпиадная математика"
+                        required
+                        className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-2.5 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-white mb-1.5">
+                        4. Группа / Параллель:
+                      </label>
+                      <input
+                        type="text"
+                        value={groupName}
+                        onChange={(e) => setGroupName(e.target.value)}
+                        placeholder="Например: 10-11 класс (Всеросс)"
+                        required
+                        className="w-full bg-[#14102C] border border-indigo-800/60 rounded-xl px-4 py-2.5 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-[#FF5252]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="pt-2 flex flex-col-reverse sm:flex-row items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setIsCheckModalOpen(false)}
+                      className="w-full sm:w-auto px-5 py-3 bg-[#14102C] hover:bg-indigo-900/50 border border-indigo-800/60 text-indigo-200 rounded-xl text-xs font-semibold transition-all cursor-pointer"
+                    >
+                      Отмена
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSubmittingTask}
+                      className="w-full sm:flex-1 py-3.5 bg-[#FF5252] hover:bg-[#ff3b3b] disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-[#FF5252]/30 flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      {isSubmittingTask ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Play className="w-4 h-4 fill-white" />
+                      )}
+                      <span>Запустить автоматический аудит ИИ</span>
+                    </button>
+                  </div>
+                </form>
+              )}
             </div>
           </div>
         </div>
