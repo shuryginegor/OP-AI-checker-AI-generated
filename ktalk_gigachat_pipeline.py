@@ -238,7 +238,11 @@ def _build_failed_task(
     talk_metadata: Dict[str, Any],
     error_message: str,
     is_corrupted: bool = False,
-    raw_broken_response: Optional[str] = None
+    raw_broken_response: Optional[str] = None,
+    ai_model: Optional[str] = None,
+    frames_uploaded: Optional[int] = None,
+    frames_planned: Optional[int] = None,
+    model_attempts: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     return {
         "id": task_id,
@@ -262,7 +266,12 @@ def _build_failed_task(
         "errorMessage": error_message,
         "applicableCount": None,
         "earnedPoints": None,
-        "maxPoints": None
+        "maxPoints": None,
+        "aiModel": ai_model,
+        "framesUploaded": frames_uploaded,
+        "framesPlanned": frames_planned,
+        "tokenUsage": None,
+        "modelAttempts": model_attempts or []
     }
 
 
@@ -376,17 +385,27 @@ async def execute_ktalk_gigachat_pipeline(
             with open(artifacts["summary"], "r", encoding="utf-8") as sf:
                 summary_text = sf.read().strip()
 
-        # 3. Системный промпт, бюджет токенов и загрузка медиа в GigaChat
+        # 3. Системный промпт, динамический токен-бюджет (аудио всегда целиком -> сперва транскрипт -> потом кадры)
         system_prompt, active_criteria = build_system_prompt(additional_info)
-        max_frames = ai_gigachat._calculate_dynamic_frame_limit(
-            transcript_text, summary_text, len(system_prompt), audio_path
+        ai_settings = ai_gigachat.load_ai_settings()
+        budget_plan = ai_gigachat.plan_multimodal_budget(
+            transcript_text=transcript_text,
+            summary_text=summary_text,
+            static_prompt_chars=len(system_prompt),
+            audio_path=audio_path,
+            total_extracted_frames=len(image_paths),
+            max_request_tokens=ai_settings["maxRequestTokens"],
+            reserved_output_tokens=ai_settings["reservedOutputTokens"]
         )
+        max_frames = budget_plan["maxFrames"]
+        planned_transcript = budget_plan["transcriptText"]
+        planned_summary = budget_plan["summaryText"]
 
         emit_stage("uploading")
-        client = ai_gigachat.get_gigachat_client()
-        model_name = os.getenv("GIGACHAT_MODEL", "GigaChat-2-Pro")
+        rotation_models = ai_gigachat.get_model_rotation_order(ai_settings.get("enableModelRotation", True))
+        client = ai_gigachat.get_gigachat_client(rotation_models[0])
 
-        audio_file_id, uploaded_frames_data = await ai_gigachat._upload_files_to_gigachat(
+        audio_file_id, uploaded_frames_data, frames_planned = await ai_gigachat._upload_files_to_gigachat(
             client, audio_path, image_paths, max_frames=max_frames
         )
 
@@ -394,14 +413,25 @@ async def execute_ktalk_gigachat_pipeline(
             uploaded_file_ids.append(audio_file_id)
         uploaded_file_ids.extend([fid for _, fid, _ in uploaded_frames_data])
 
+        frames_uploaded = len(uploaded_frames_data)
         talk_metadata["hasAudio"] = bool(audio_file_id)
-        talk_metadata["framesUploaded"] = len(uploaded_frames_data)
+        talk_metadata["framesUploaded"] = frames_uploaded
+        talk_metadata["framesPlanned"] = frames_planned
+
+        if audio_path and os.path.exists(audio_path) and not audio_file_id:
+            err_msg = "Не удалось загрузить аудиодорожку занятия в облако GigaChat. По правилам полной мультимодальной проверки анализ без аудиодорожки не выполняется."
+            print(f"[Pipeline] {err_msg}", file=sys.stderr)
+            return _build_failed_task(
+                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata, err_msg,
+                frames_uploaded=frames_uploaded, frames_planned=frames_planned
+            )
 
         if not uploaded_file_ids:
             err_msg = "Не удалось загрузить аудиодорожку и видеокадры в облако GigaChat. Повторите проверку позже."
             print(f"[Pipeline] {err_msg}", file=sys.stderr)
             return _build_failed_task(
-                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata, err_msg
+                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata, err_msg,
+                frames_uploaded=frames_uploaded, frames_planned=frames_planned
             )
 
         # Удаляем локальные временные медиа сразу после завершения загрузки в GigaChat
@@ -419,7 +449,7 @@ async def execute_ktalk_gigachat_pipeline(
         )
 
         audio_desc = (
-            f"- Полная аудиодорожка занятия прикреплена (ID файла: {audio_file_id})\n"
+            f"- Полная оригинальная аудиодорожка занятия прикреплена без обрезки (ID файла: {audio_file_id})\n"
             if audio_file_id
             else "- Аудиодорожка не была извлечена.\n"
         )
@@ -437,85 +467,32 @@ async def execute_ktalk_gigachat_pipeline(
 
 АУДИОДОРОЖКА ВСТРЕЧИ:
 {audio_desc}
-КЛЮЧЕВЫЕ КАДРЫ ЭКРАНА С ТАЙМКОДАМИ ({len(uploaded_frames_data)} шт.):
+КЛЮЧЕВЫЕ КАДРЫ ЭКРАНА С ТАЙМКОДАМИ ({frames_uploaded} из {frames_planned} запланированных):
 {frames_description}
 
 --- ТЕКСТОВЫЕ МАТЕРИАЛЫ ---
 ИИ-Краткий пересказ встречи (Саммари):
-{summary_text if summary_text else 'Отсутствует'}
+{planned_summary if planned_summary else 'Отсутствует'}
 
 Транскрипт общения с таймкодами реплик:
-{transcript_text if transcript_text else 'Транскрипт не предоставлен сервером КТалк; ориентируйся на аудиодорожку и кадры экрана.'}
+{planned_transcript if planned_transcript else 'Транскрипт не предоставлен сервером КТалк; ориентируйся на аудиодорожку и кадры экрана.'}
 
 ИНСТРУКЦИЯ ПО АНАЛИЗУ:
 1. Внимательно проанализируй аудиодорожку, прикреплённые кадры экрана и транскрипт в сопоставлении с критериями оценивания.
-2. По каждому критерию при нарушении (score 1 или 2) ОБЯЗАТЕЛЬНО укажи точные таймкоды в `timecodes` вида `["ЧЧ:ММ:СС"]` и подтверждающую цитату в `quote`.
+2. По каждому критерию при нарушении (score 1 или 2) ОБЯЗАЛЬНО укажи точные таймкоды в `timecodes` вида `["ЧЧ:ММ:СС"]` и подтверждающую цитату в `quote`.
 3. Оцени ровно {len(active_criteria)} критериев (`id` от 1 до {len(active_criteria)}). Неприменимые по формату критерии отмечай как `null`.
 4. Выдай итоговый ответ СТРОГО в виде валидного JSON-объекта."""
 
-        # 4. Мультимодальный запрос в GigaChat
+        # 4. Мультимодальный запрос в GigaChat со строгой ротацией моделей:
+        # Pro -> Max -> Ultra -> Base (обычная только в крайнем случае)
         emit_stage("analyzing")
-        chat_payload = Chat(
-            model=model_name,
-            messages=[
-                Messages(role=MessagesRole.SYSTEM, content=system_prompt),
-                Messages(role=MessagesRole.USER, content=user_text, attachments=uploaded_file_ids)
-            ],
-            max_tokens=8192,
-            temperature=0.1
-        )
-
-        raw_response = ""
-        t_start = time.time()
-        print(
-            f"[GigaChat] Отправка мультимодального запроса ({model_name}, вложений: {len(uploaded_file_ids)})...",
-            file=sys.stderr
-        )
-
-        max_retries = 5
-        resp = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                resp = await client.achat(chat_payload)
-                break
-            except Exception as attempt_err:
-                err_str = str(attempt_err)
-                is_rate_limit = (
-                    "429" in err_str
-                    or "Too Many Requests" in err_str
-                    or "RateLimit" in type(attempt_err).__name__
-                )
-                if is_rate_limit and attempt < max_retries:
-                    wait_time = attempt * 7
-                    print(
-                        f"[GigaChat] Ошибка 429 (Too Many Requests). Повтор {attempt}/{max_retries} через {wait_time} сек...",
-                        file=sys.stderr
-                    )
-                    await asyncio.sleep(wait_time)
-                else:
-                    tb = traceback.format_exc()
-                    return _build_failed_task(
-                        task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata,
-                        f"Ошибка обращения к GigaChat API: {attempt_err}",
-                        is_corrupted=False,
-                        raw_broken_response=f"{attempt_err}\n\n{tb}"
-                    )
-
-        gen_time = time.time() - t_start
-        print(f"[GigaChat] Ответ получен за {gen_time:.2f} сек!", file=sys.stderr)
-
-        choices = resp.choices if resp and hasattr(resp, "choices") else []
-        if not choices or not getattr(choices[0], "message", None):
-            return _build_failed_task(
-                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata,
-                "GigaChat вернул пустой ответ (choices отсутствует).",
-                is_corrupted=True,
-                raw_broken_response=str(resp)
-            )
-
-        choice = choices[0]
-        finish_reason = getattr(choice, "finish_reason", None)
-        raw_response = choice.message.content or ""
+        model_attempts: List[Dict[str, Any]] = []
+        winning_model: Optional[str] = None
+        winning_finish_reason: Optional[str] = None
+        winning_usage: Dict[str, Any] = {}
+        parsed_result: Optional[Dict[str, Any]] = None
+        last_raw_response: str = ""
+        last_error_text: str = "Ни одна модель GigaChat не смогла завершить проверку."
 
         refusal_keywords = [
             "разговоры на чувствительные темы",
@@ -525,28 +502,159 @@ async def execute_ktalk_gigachat_pipeline(
             "модели не обладают собственным мнением",
             "чувствительные темы могут быть ограничены"
         ]
-        is_refused = (
-            finish_reason in ["blacklist", "content_filter", "censorship"]
-            or any(kw in raw_response.lower() for kw in refusal_keywords)
-        )
-        if is_refused:
-            return _build_failed_task(
-                task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata,
-                f"Нейросеть отказалась проверять лекцию (причина: {finish_reason or 'цензура безопасности'}).",
-                is_corrupted=True,
-                raw_broken_response=raw_response
+
+        messages_payload = [
+            Messages(role=MessagesRole.SYSTEM, content=system_prompt),
+            Messages(role=MessagesRole.USER, content=user_text, attachments=uploaded_file_ids)
+        ]
+
+        for candidate_model in rotation_models:
+            t_model_start = time.time()
+            print(
+                f"[GigaChat] Попытка анализа на модели {candidate_model} "
+                f"(вложений: {len(uploaded_file_ids)}, кадры: {frames_uploaded}/{frames_planned}, бюджет: {budget_plan['configuredBudgetTokens']})...",
+                file=sys.stderr
+            )
+            chat_payload = Chat(
+                model=candidate_model,
+                messages=messages_payload,
+                max_tokens=budget_plan["reservedOutputTokens"],
+                temperature=0.1
             )
 
-        # 5. Парсинг ответа через ai_common.py
-        try:
-            parsed_result = ai_common.parse_analysis_json(raw_response)
-        except Exception as parse_err:
-            print(f"[ai_common] Ошибка парсинга JSON: {parse_err}", file=sys.stderr)
+            resp = None
+            call_err: Optional[Exception] = None
+            for sub_try in range(1, 3):
+                try:
+                    resp = await client.achat(chat_payload)
+                    call_err = None
+                    break
+                except Exception as attempt_err:
+                    call_err = attempt_err
+                    err_str = str(attempt_err)
+                    is_transient_429 = ("429" in err_str or "Too Many Requests" in err_str) and sub_try < 2
+                    if is_transient_429:
+                        print(
+                            f"[GigaChat] Модель {candidate_model}: 429 Too Many Requests, короткая пауза 5 сек перед переключением...",
+                            file=sys.stderr
+                        )
+                        await asyncio.sleep(5)
+                    else:
+                        break
+
+            elapsed_model = round(time.time() - t_model_start, 2)
+
+            if call_err is not None or resp is None:
+                err_str = str(call_err or "Пустой ответ API")
+                last_error_text = f"{candidate_model}: {err_str}"
+                print(f"[GigaChat] Модель {candidate_model} не завершила запрос ({elapsed_model}s): {err_str}. Переход к следующей модели...", file=sys.stderr)
+                model_attempts.append({
+                    "model": candidate_model,
+                    "status": "failed",
+                    "reason": err_str[:300],
+                    "durationSec": elapsed_model
+                })
+                continue
+
+            usage_obj = getattr(resp, "usage", None)
+            p_tokens = int(getattr(usage_obj, "prompt_tokens", 0) or 0) if usage_obj else 0
+            c_tokens = int(getattr(usage_obj, "completion_tokens", 0) or 0) if usage_obj else 0
+            t_tokens = int(getattr(usage_obj, "total_tokens", 0) or 0) if usage_obj else (p_tokens + c_tokens)
+
+            choices = resp.choices if hasattr(resp, "choices") else []
+            if not choices or not getattr(choices[0], "message", None):
+                last_error_text = f"{candidate_model}: пустой ответ choices"
+                model_attempts.append({
+                    "model": candidate_model,
+                    "status": "failed",
+                    "reason": "Пустой choices от модели",
+                    "promptTokens": p_tokens,
+                    "completionTokens": c_tokens,
+                    "totalTokens": t_tokens,
+                    "durationSec": elapsed_model
+                })
+                continue
+
+            choice = choices[0]
+            finish_reason = str(getattr(choice, "finish_reason", "") or "")
+            raw_response = choice.message.content or ""
+            last_raw_response = raw_response
+
+            is_refused = (
+                finish_reason in ("blacklist", "content_filter", "censorship")
+                or any(kw in raw_response.lower() for kw in refusal_keywords)
+            )
+            if is_refused:
+                last_error_text = f"{candidate_model}: отказ по фильтру безопасности ({finish_reason or 'blacklist'})"
+                print(f"[GigaChat] {last_error_text}. Переключаемся на следующую модель...", file=sys.stderr)
+                model_attempts.append({
+                    "model": candidate_model,
+                    "status": "refused",
+                    "finishReason": finish_reason or "blacklist",
+                    "reason": "Сработал фильтр безопасности модели",
+                    "promptTokens": p_tokens,
+                    "completionTokens": c_tokens,
+                    "totalTokens": t_tokens,
+                    "durationSec": elapsed_model
+                })
+                continue
+
+            try:
+                candidate_parsed = ai_common.parse_analysis_json(raw_response)
+                parsed_count = len(candidate_parsed.get("criteria_scores") or [])
+                if finish_reason == "length" and parsed_count < max(1, len(active_criteria) // 2):
+                    raise ValueError(f"Ответ обрезан по окну генерации (finish_reason=length, разобрано критериев {parsed_count}/{len(active_criteria)})")
+
+                winning_model = candidate_model
+                winning_finish_reason = finish_reason or "stop"
+                winning_usage = {
+                    "promptTokens": p_tokens,
+                    "completionTokens": c_tokens,
+                    "totalTokens": t_tokens,
+                    "finishReason": winning_finish_reason,
+                    "durationSec": elapsed_model
+                }
+                parsed_result = candidate_parsed
+                model_attempts.append({
+                    "model": candidate_model,
+                    "status": "completed",
+                    "finishReason": winning_finish_reason,
+                    "promptTokens": p_tokens,
+                    "completionTokens": c_tokens,
+                    "totalTokens": t_tokens,
+                    "durationSec": elapsed_model
+                })
+                print(
+                    f"[GigaChat] ✅ Проверка успешно завершена моделью {winning_model} за {elapsed_model}s "
+                    f"(токены: {t_tokens}, finish_reason={winning_finish_reason})",
+                    file=sys.stderr
+                )
+                break
+            except Exception as parse_err:
+                last_error_text = f"{candidate_model}: {parse_err}"
+                print(f"[GigaChat] Ошибка разбора JSON от {candidate_model}: {parse_err}. Переключаемся на следующую модель...", file=sys.stderr)
+                model_attempts.append({
+                    "model": candidate_model,
+                    "status": "corrupted",
+                    "finishReason": finish_reason,
+                    "reason": str(parse_err)[:300],
+                    "promptTokens": p_tokens,
+                    "completionTokens": c_tokens,
+                    "totalTokens": t_tokens,
+                    "durationSec": elapsed_model
+                })
+                continue
+
+        if not winning_model or parsed_result is None:
             return _build_failed_task(
                 task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata,
-                f"Не удалось разобрать JSON-ответ нейросети: {parse_err}",
-                is_corrupted=True,
-                raw_broken_response=raw_response
+                f"Все доступные модели ротации ({', '.join(rotation_models)}) не смогли завершить проверку. Последняя ошибка: {last_error_text}",
+                is_corrupted=bool(last_raw_response),
+                raw_broken_response=last_raw_response or last_error_text,
+                ai_model=None,
+                frames_uploaded=frames_uploaded,
+                frames_planned=frames_planned,
+                model_attempts=model_attempts
             )
 
         # 6. Честный подсчет баллов без искусственных обнулений и с поддержкой Н/П (null)
@@ -659,7 +767,11 @@ async def execute_ktalk_gigachat_pipeline(
                 task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata,
                 "Нейросеть отметила все критерии как неприменимые — расчёт оценки невозможен.",
                 is_corrupted=True,
-                raw_broken_response=raw_response
+                raw_broken_response=last_raw_response,
+                ai_model=winning_model,
+                frames_uploaded=frames_uploaded,
+                frames_planned=frames_planned,
+                model_attempts=model_attempts
             )
 
         total_score_pct = int(round((earned_raw / max_raw) * 100))
@@ -672,6 +784,24 @@ async def execute_ktalk_gigachat_pipeline(
 
         passed_crits = [c for c in final_criteria if not c.get("notApplicable") and c["passed"]]
         pos_highlights = [f"«{c['category']}»: {c['comment']}" for c in passed_crits[:3]]
+
+        talk_metadata["aiModel"] = winning_model
+        token_usage_payload = {
+            "promptTokens": winning_usage.get("promptTokens", 0),
+            "completionTokens": winning_usage.get("completionTokens", 0),
+            "totalTokens": winning_usage.get("totalTokens", 0),
+            "estimatedInputTokens": budget_plan["estimatedInputTokens"],
+            "configuredBudgetTokens": budget_plan["configuredBudgetTokens"],
+            "reservedOutputTokens": budget_plan["reservedOutputTokens"],
+            "audioEstimatedTokens": budget_plan["audioEstimatedTokens"],
+            "textEstimatedTokens": budget_plan["textEstimatedTokens"],
+            "framesEstimatedTokens": budget_plan["framesEstimatedTokens"],
+            "transcriptTrimmed": budget_plan["transcriptTrimmed"],
+            "transcriptOriginalChars": budget_plan["transcriptOriginalChars"],
+            "transcriptSentChars": budget_plan["transcriptSentChars"],
+            "finishReason": winning_finish_reason,
+            "durationSec": winning_usage.get("durationSec", 0)
+        }
 
         result_task = {
             "id": task_id,
@@ -695,7 +825,12 @@ async def execute_ktalk_gigachat_pipeline(
             "errorMessage": None,
             "applicableCount": applicable_count,
             "earnedPoints": earned_five_points,
-            "maxPoints": max_five_points
+            "maxPoints": max_five_points,
+            "aiModel": winning_model,
+            "framesUploaded": frames_uploaded,
+            "framesPlanned": frames_planned,
+            "tokenUsage": token_usage_payload,
+            "modelAttempts": model_attempts
         }
         return result_task
 

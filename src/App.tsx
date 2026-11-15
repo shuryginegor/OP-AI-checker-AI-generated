@@ -47,6 +47,7 @@ import {
 } from 'lucide-react';
 import { PromptEditor, ReportDisplaySettings } from './components/PromptEditor';
 import { CriteriaManager } from './components/CriteriaManager';
+import { AILimitsPanel } from './components/AILimitsPanel';
 
 // Official Brand Logo component for "Олимпиадные Практики" (olympiadpractices.ru)
 function OlympLogo({ className = "w-8 h-8" }: { className?: string }) {
@@ -102,7 +103,7 @@ function OlympHeaderLogo() {
           </span>
         </div>
         <span className="text-[10px] text-indigo-300/80 font-medium tracking-wide mt-0.5">
-          Система методического аудита вебинаров КТалк • Сбер GigaChat-2-Pro
+          Система методического аудита вебинаров КТалк • Сбер GigaChat (Pro / Max / Ultra)
         </span>
       </div>
     </div>
@@ -226,7 +227,7 @@ export default function App() {
   const [loginMessage, setLoginMessage] = useState<string>('');
 
   // Вкладки
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'submit' | 'curators' | 'audit' | 'criteria' | 'prompt_editor' | 'brandbook' | 'criteria_manager'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'submit' | 'curators' | 'audit' | 'criteria' | 'prompt_editor' | 'ai_limits' | 'brandbook' | 'criteria_manager'>('dashboard');
 
   // Дашборд и задачи
   const [tasks, setTasks] = useState<any[]>([]);
@@ -1218,7 +1219,7 @@ export default function App() {
           {isSenior && (
             <button
               onClick={() => setActiveTab('prompt_editor')}
-              className={`px-4 py-2 text-xs font-semibold rounded-t-xl transition-all flex items-center gap-2 border-b-2 ${
+              className={`px-4 py-2 text-xs font-semibold rounded-t-xl transition-all flex items-center gap-2 border-b-2 whitespace-nowrap shrink-0 ${
                 activeTab === 'prompt_editor'
                   ? 'border-amber-400 text-white bg-[#2B2363]'
                   : 'border-transparent text-amber-200/80 hover:text-white hover:bg-[#241E4F]/60'
@@ -1227,6 +1228,23 @@ export default function App() {
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
               <span>Редактор промпта ИИ</span>
               <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded font-bold border border-amber-500/30">
+                Senior
+              </span>
+            </button>
+          )}
+
+          {isSenior && (
+            <button
+              onClick={() => setActiveTab('ai_limits')}
+              className={`px-4 py-2 text-xs font-semibold rounded-t-xl transition-all flex items-center gap-2 border-b-2 whitespace-nowrap shrink-0 cursor-pointer ${
+                activeTab === 'ai_limits'
+                  ? 'border-[#38BDF8] text-white bg-[#2B2363]'
+                  : 'border-transparent text-cyan-200/80 hover:text-white hover:bg-[#241E4F]/60'
+              }`}
+            >
+              <Cpu className="w-3.5 h-3.5 text-[#38BDF8]" />
+              <span>Токены и модели ИИ</span>
+              <span className="text-[9px] bg-cyan-500/20 text-[#38BDF8] px-1.5 py-0.2 rounded font-bold border border-cyan-500/30">
                 Senior
               </span>
             </button>
@@ -1508,10 +1526,53 @@ export default function App() {
                               Разбор повреждён
                             </span>
                           ) : t.status === 'completed' ? (
-                            <span className="inline-flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium">
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              Проверено GigaChat
-                            </span>
+                            <div className="space-y-1">
+                              {(() => {
+                                const completedModel = t.aiModel || t.talkMetadata?.aiModel || null;
+                                const isBaseModel = completedModel === 'GigaChat-2' || completedModel === 'GigaChat';
+                                const usage = t.tokenUsage;
+                                const framesUp = t.framesUploaded ?? t.talkMetadata?.framesUploaded ?? null;
+                                const framesPlan = t.framesPlanned ?? t.talkMetadata?.framesPlanned ?? null;
+                                return (
+                                  <>
+                                    <span className="inline-flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium">
+                                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                                      <span>
+                                        {completedModel ? (
+                                          <>
+                                            Проверено{' '}
+                                            <span className={`font-mono ${isBaseModel ? 'text-amber-300 font-semibold' : 'text-emerald-300 font-semibold'}`}>
+                                              {completedModel}
+                                            </span>
+                                          </>
+                                        ) : (
+                                          'Проверено GigaChat'
+                                        )}
+                                      </span>
+                                    </span>
+                                    {isSenior && (
+                                      <div className="text-[10px] font-mono tabular-nums text-indigo-300/85">
+                                        {usage && typeof usage.totalTokens === 'number' && usage.totalTokens > 0 ? (
+                                          <>
+                                            {Number(usage.totalTokens).toLocaleString('ru-RU')} ток.
+                                            {typeof framesUp === 'number' && (
+                                              <>
+                                                <span aria-hidden="true"> · </span>
+                                                {framesUp}{typeof framesPlan === 'number' ? `/${framesPlan}` : ''} кадр.
+                                              </>
+                                            )}
+                                          </>
+                                        ) : typeof framesUp === 'number' ? (
+                                          <span>{framesUp}{typeof framesPlan === 'number' ? `/${framesPlan}` : ''} кадр.</span>
+                                        ) : (
+                                          <span className="text-indigo-400/70">До учёта токенов</span>
+                                        )}
+                                      </div>
+                                    )}
+                                  </>
+                                );
+                              })()}
+                            </div>
                           ) : t.status === 'pending' ? (
                             <span className="inline-flex items-center gap-1.5 text-[11px] text-indigo-200 font-semibold bg-indigo-500/15 border border-indigo-400/30 px-2.5 py-1 rounded-lg">
                               <Clock className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
@@ -2428,6 +2489,18 @@ export default function App() {
         )}
 
         {/* ======================================================== */}
+        {/* ВКЛАДКА 5.5: ТОКЕНЫ И МОДЕЛИ ИИ (ТОЛЬКО ДЛЯ СТАРШИХ)     */}
+        {/* ======================================================== */}
+        {activeTab === 'ai_limits' && isSenior && (
+          <AILimitsPanel
+            token={authToken}
+            isSeniorCurator={isSenior}
+            tasks={tasks}
+            onSettingsSaved={fetchTasksAndTeachers}
+          />
+        )}
+
+        {/* ======================================================== */}
         {/* ВКЛАДКА 6: КРИТЕРИИ ОЦЕНКИ (ДИНАМИЧЕСКИЙ СПИСОК)         */}
         {/* ======================================================== */}
         {activeTab === 'criteria' && (
@@ -2598,9 +2671,23 @@ export default function App() {
             {/* Шапка модалки */}
             <div className="p-6 border-b border-indigo-900/60 flex items-center justify-between bg-[#14102C]/60">
               <div>
-                <span className="text-[10px] font-mono font-bold bg-[#FF5252]/20 text-[#FF5252] border border-[#FF5252]/30 px-2 py-0.5 rounded-full">
-                  #{activeDetailTask.id} • {activeDetailTask.date}
-                </span>
+                <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono tabular-nums text-indigo-300">
+                  <span className="text-[#FF5252] font-bold">#{activeDetailTask.id}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{activeDetailTask.date}</span>
+                  {(activeDetailTask.aiModel || activeDetailTask.talkMetadata?.aiModel) && (() => {
+                    const m = activeDetailTask.aiModel || activeDetailTask.talkMetadata?.aiModel;
+                    const isBase = m === 'GigaChat-2' || m === 'GigaChat';
+                    return (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className={isBase ? 'text-amber-300 font-bold' : 'text-[#38BDF8] font-semibold'}>
+                          Модель: {m}{isBase ? ' (резерв)' : ''}
+                        </span>
+                      </>
+                    );
+                  })()}
+                </div>
                 <h3 className="text-lg font-black text-white mt-1">
                   {activeDetailTask.teacherName}
                 </h3>
@@ -2697,6 +2784,67 @@ export default function App() {
                       </span>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {/* Телеметрия токенов, кадров и ротации моделей (ТОЛЬКО ДЛЯ СТАРШЕГО КУРАТОРА) */}
+              {isSenior && (activeDetailTask.tokenUsage || typeof activeDetailTask.framesUploaded === 'number' || activeDetailTask.aiModel) && (
+                <div className="bg-[#14102C] border border-indigo-800/60 rounded-2xl p-4 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-900/50 pb-2">
+                    <span className="text-xs font-bold text-white flex items-center gap-2">
+                      <Cpu className="w-4 h-4 text-[#38BDF8]" />
+                      <span>Технический учёт запроса ИИ (виден только старшим кураторам)</span>
+                    </span>
+                    <span className="text-[11px] font-mono text-indigo-300">
+                      Модель отчёта: <strong className="text-white">{activeDetailTask.aiModel || activeDetailTask.talkMetadata?.aiModel || '—'}</strong>
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                    <div>
+                      <span className="text-indigo-400 block text-[10px]">Токены запроса (факт)</span>
+                      <span className="font-mono tabular-nums font-bold text-[#38BDF8]">
+                        {activeDetailTask.tokenUsage?.totalTokens
+                          ? `${Number(activeDetailTask.tokenUsage.totalTokens).toLocaleString('ru-RU')} ток.`
+                          : 'До учёта токенов'}
+                      </span>
+                      {activeDetailTask.tokenUsage?.totalTokens ? (
+                        <div className="text-[10px] font-mono tabular-nums text-indigo-300/80 mt-0.5">
+                          вход {Number(activeDetailTask.tokenUsage.promptTokens || 0).toLocaleString('ru-RU')} + ответ {Number(activeDetailTask.tokenUsage.completionTokens || 0).toLocaleString('ru-RU')}
+                        </div>
+                      ) : null}
+                    </div>
+                    <div>
+                      <span className="text-indigo-400 block text-[10px]">Отправлено видеокадров</span>
+                      <span className="font-mono tabular-nums font-bold text-white">
+                        {typeof activeDetailTask.framesUploaded === 'number'
+                          ? `${activeDetailTask.framesUploaded}${typeof activeDetailTask.framesPlanned === 'number' ? ` из ${activeDetailTask.framesPlanned}` : ''} кадр.`
+                          : '—'}
+                      </span>
+                      <div className="text-[10px] text-indigo-300/80 mt-0.5">
+                        Аудиодорожка передана целиком
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-indigo-400 block text-[10px]">Транскрипт и лимит запроса</span>
+                      <span className="font-mono tabular-nums text-white font-semibold">
+                        {activeDetailTask.tokenUsage
+                          ? activeDetailTask.tokenUsage.transcriptTrimmed
+                            ? `Сжат (${Number(activeDetailTask.tokenUsage.transcriptSentChars || 0).toLocaleString('ru-RU')}/${Number(activeDetailTask.tokenUsage.transcriptOriginalChars || 0).toLocaleString('ru-RU')} симв.)`
+                            : 'Полный без обрезки'
+                          : '—'}
+                      </span>
+                      {activeDetailTask.tokenUsage?.configuredBudgetTokens ? (
+                        <div className="text-[10px] font-mono tabular-nums text-indigo-300/80 mt-0.5">
+                          Лимит: {Number(activeDetailTask.tokenUsage.configuredBudgetTokens).toLocaleString('ru-RU')} ток.
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                  {Array.isArray(activeDetailTask.modelAttempts) && activeDetailTask.modelAttempts.length > 1 && (
+                    <div className="pt-2 border-t border-indigo-900/40 text-[11px] text-indigo-300 font-mono">
+                      Цепочка перебора: {activeDetailTask.modelAttempts.map((a: any) => `${a.model} (${a.status})`).join(' → ')}
+                    </div>
+                  )}
                 </div>
               )}
 

@@ -24,6 +24,34 @@ export interface AuditLogRecord {
   ipAddress: string;
 }
 
+export interface TokenUsageInfo {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimatedInputTokens?: number;
+  configuredBudgetTokens?: number;
+  reservedOutputTokens?: number;
+  audioEstimatedTokens?: number;
+  textEstimatedTokens?: number;
+  framesEstimatedTokens?: number;
+  transcriptTrimmed?: boolean;
+  transcriptOriginalChars?: number;
+  transcriptSentChars?: number;
+  finishReason?: string;
+  durationSec?: number;
+}
+
+export interface ModelAttemptInfo {
+  model: string;
+  status: string;
+  finishReason?: string;
+  reason?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  durationSec?: number;
+}
+
 export interface LectureTaskRecord {
   id: string;
   lectureUrl: string;
@@ -52,6 +80,9 @@ export interface LectureTaskRecord {
     resolution?: string;
     url?: string;
     domain?: string;
+    aiModel?: string;
+    framesUploaded?: number;
+    framesPlanned?: number;
     [key: string]: any;
   } | null;
   isCorrupted?: boolean;
@@ -60,7 +91,26 @@ export interface LectureTaskRecord {
   applicableCount?: number | null;
   earnedPoints?: number | null;
   maxPoints?: number | null;
+  aiModel?: string | null;
+  tokenUsage?: TokenUsageInfo | null;
+  framesUploaded?: number | null;
+  framesPlanned?: number | null;
+  modelAttempts?: ModelAttemptInfo[] | null;
 }
+
+export interface AISettings {
+  maxRequestTokens: number;
+  reservedOutputTokens: number;
+  enableModelRotation: boolean;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export const DEFAULT_AI_SETTINGS: AISettings = {
+  maxRequestTokens: 128000,
+  reservedOutputTokens: 8192,
+  enableModelRotation: true
+};
 
 export interface ReportDisplaySettings {
   displayMode: 'five_point' | 'penalty' | 'status_only';
@@ -237,6 +287,11 @@ async function initTablesPG() {
       applicable_count INTEGER,
       earned_points INTEGER,
       max_points INTEGER,
+      ai_model VARCHAR(64),
+      token_usage_json TEXT,
+      frames_uploaded INTEGER,
+      frames_planned INTEGER,
+      model_attempts_json TEXT,
       created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -302,6 +357,11 @@ async function initTablesPG() {
       ALTER TABLE lecture_tasks ADD COLUMN IF NOT EXISTS applicable_count INTEGER;
       ALTER TABLE lecture_tasks ADD COLUMN IF NOT EXISTS earned_points INTEGER;
       ALTER TABLE lecture_tasks ADD COLUMN IF NOT EXISTS max_points INTEGER;
+      ALTER TABLE lecture_tasks ADD COLUMN IF NOT EXISTS ai_model VARCHAR(64);
+      ALTER TABLE lecture_tasks ADD COLUMN IF NOT EXISTS token_usage_json TEXT;
+      ALTER TABLE lecture_tasks ADD COLUMN IF NOT EXISTS frames_uploaded INTEGER;
+      ALTER TABLE lecture_tasks ADD COLUMN IF NOT EXISTS frames_planned INTEGER;
+      ALTER TABLE lecture_tasks ADD COLUMN IF NOT EXISTS model_attempts_json TEXT;
     `);
   } catch (migErr) {
     // Игнорируем если уже добавлены
@@ -357,6 +417,11 @@ async function initTablesSQLite() {
       applicable_count INTEGER,
       earned_points INTEGER,
       max_points INTEGER,
+      ai_model TEXT,
+      token_usage_json TEXT,
+      frames_uploaded INTEGER,
+      frames_planned INTEGER,
+      model_attempts_json TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -420,6 +485,11 @@ async function initTablesSQLite() {
   try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN applicable_count INTEGER;"); } catch {}
   try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN earned_points INTEGER;"); } catch {}
   try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN max_points INTEGER;"); } catch {}
+  try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN ai_model TEXT;"); } catch {}
+  try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN token_usage_json TEXT;"); } catch {}
+  try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN frames_uploaded INTEGER;"); } catch {}
+  try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN frames_planned INTEGER;"); } catch {}
+  try { sqliteDb.exec("ALTER TABLE lecture_tasks ADD COLUMN model_attempts_json TEXT;"); } catch {}
 }
 
 let inMemoryAuditLogs: AuditLogRecord[] = [];
@@ -1037,7 +1107,12 @@ export async function getLectureTasks(): Promise<LectureTaskRecord[]> {
           errorMessage: r.error_message || null,
           applicableCount: r.applicable_count ?? null,
           earnedPoints: r.earned_points ?? null,
-          maxPoints: r.max_points ?? null
+          maxPoints: r.max_points ?? null,
+          aiModel: r.ai_model || null,
+          tokenUsage: safeJsonParse(r.token_usage_json, null),
+          framesUploaded: r.frames_uploaded ?? null,
+          framesPlanned: r.frames_planned ?? null,
+          modelAttempts: safeJsonParse(r.model_attempts_json, null)
         };
         dbTasksMap.set(r.id, taskObj);
         inMemoryTasksMap.set(r.id, taskObj);
@@ -1072,7 +1147,12 @@ export async function getLectureTasks(): Promise<LectureTaskRecord[]> {
           errorMessage: r.error_message || null,
           applicableCount: r.applicable_count ?? null,
           earnedPoints: r.earned_points ?? null,
-          maxPoints: r.max_points ?? null
+          maxPoints: r.max_points ?? null,
+          aiModel: r.ai_model || null,
+          tokenUsage: safeJsonParse(r.token_usage_json, null),
+          framesUploaded: r.frames_uploaded ?? null,
+          framesPlanned: r.frames_planned ?? null,
+          modelAttempts: safeJsonParse(r.model_attempts_json, null)
         };
         dbTasksMap.set(r.id, taskObj);
         inMemoryTasksMap.set(r.id, taskObj);
@@ -1154,6 +1234,11 @@ export async function requeueLectureTaskInDB(taskId: string): Promise<LectureTas
     applicableCount: null,
     earnedPoints: null,
     maxPoints: null,
+    aiModel: null,
+    tokenUsage: null,
+    framesUploaded: null,
+    framesPlanned: null,
+    modelAttempts: null,
     createdAt: nowIso
   };
 
@@ -1167,7 +1252,9 @@ export async function requeueLectureTaskInDB(taskId: string): Promise<LectureTas
          SET status = 'pending', progress_pct = 0, total_score = NULL,
              is_corrupted = FALSE, raw_broken_response = NULL, error_message = NULL,
              critical_violations = '[]', positive_highlights = '[]', recommendations = '[]', criteria_data = '[]',
-             applicable_count = NULL, earned_points = NULL, max_points = NULL, created_at = $1
+             applicable_count = NULL, earned_points = NULL, max_points = NULL,
+             ai_model = NULL, token_usage_json = NULL, frames_uploaded = NULL, frames_planned = NULL, model_attempts_json = NULL,
+             created_at = $1
          WHERE id = $2`,
         [nowIso, taskId]
       );
@@ -1177,7 +1264,9 @@ export async function requeueLectureTaskInDB(taskId: string): Promise<LectureTas
          SET status = 'pending', progress_pct = 0, total_score = NULL,
              is_corrupted = 0, raw_broken_response = NULL, error_message = NULL,
              critical_violations = '[]', positive_highlights = '[]', recommendations = '[]', criteria_data = '[]',
-             applicable_count = NULL, earned_points = NULL, max_points = NULL, created_at = ?
+             applicable_count = NULL, earned_points = NULL, max_points = NULL,
+             ai_model = NULL, token_usage_json = NULL, frames_uploaded = NULL, frames_planned = NULL, model_attempts_json = NULL,
+             created_at = ?
          WHERE id = ?`
       );
       stmt.run(nowIso, taskId);
@@ -1212,7 +1301,12 @@ export async function insertLectureTask(task: LectureTaskRecord): Promise<boolea
     errorMessage: task.errorMessage || null,
     applicableCount: task.applicableCount ?? null,
     earnedPoints: task.earnedPoints ?? null,
-    maxPoints: task.maxPoints ?? null
+    maxPoints: task.maxPoints ?? null,
+    aiModel: task.aiModel ?? null,
+    tokenUsage: task.tokenUsage ?? null,
+    framesUploaded: task.framesUploaded ?? null,
+    framesPlanned: task.framesPlanned ?? null,
+    modelAttempts: task.modelAttempts ?? null
   };
 
   // Сразу кэшируем в память и мгновенно сохраняем в файл бэкапа
@@ -1228,6 +1322,8 @@ export async function insertLectureTask(task: LectureTaskRecord): Promise<boolea
     const isCorruptedVal = safeTask.isCorrupted ? 1 : 0;
     const rawBroken = safeTask.rawBrokenResponse || null;
     const errMsg = safeTask.errorMessage || null;
+    const tokenUsageJson = safeTask.tokenUsage ? JSON.stringify(safeTask.tokenUsage) : null;
+    const modelAttemptsJson = Array.isArray(safeTask.modelAttempts) ? JSON.stringify(safeTask.modelAttempts) : null;
 
     if (isPostgres && pgPool) {
       await pgPool.query(
@@ -1236,8 +1332,10 @@ export async function insertLectureTask(task: LectureTaskRecord): Promise<boolea
            total_score, status, progress_pct, curator_email,
            critical_violations, positive_highlights, recommendations, criteria_data,
            talk_metadata, is_corrupted, raw_broken_response,
-           error_message, applicable_count, earned_points, max_points, created_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+           error_message, applicable_count, earned_points, max_points,
+           ai_model, token_usage_json, frames_uploaded, frames_planned, model_attempts_json,
+           created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
          ON CONFLICT (id) DO UPDATE SET
            status = $8, progress_pct = $9, total_score = $7,
            critical_violations = $11, positive_highlights = $12, recommendations = $13, criteria_data = $14,
@@ -1247,13 +1345,20 @@ export async function insertLectureTask(task: LectureTaskRecord): Promise<boolea
            error_message = $18,
            applicable_count = $19,
            earned_points = $20,
-           max_points = $21`,
+           max_points = $21,
+           ai_model = COALESCE($22, lecture_tasks.ai_model),
+           token_usage_json = COALESCE($23, lecture_tasks.token_usage_json),
+           frames_uploaded = COALESCE($24, lecture_tasks.frames_uploaded),
+           frames_planned = COALESCE($25, lecture_tasks.frames_planned),
+           model_attempts_json = COALESCE($26, lecture_tasks.model_attempts_json)`,
         [
           safeTask.id, safeTask.lectureUrl, safeTask.teacherName, safeTask.subject, safeTask.groupName, safeTask.date,
           safeTask.totalScore, safeTask.status, safeTask.progressPct, safeTask.curatorEmail,
           critJson, posJson, recJson, criteriaJson,
           talkMetaJson, Boolean(safeTask.isCorrupted), rawBroken,
-          errMsg, safeTask.applicableCount ?? null, safeTask.earnedPoints ?? null, safeTask.maxPoints ?? null, safeTask.createdAt
+          errMsg, safeTask.applicableCount ?? null, safeTask.earnedPoints ?? null, safeTask.maxPoints ?? null,
+          safeTask.aiModel || null, tokenUsageJson, safeTask.framesUploaded ?? null, safeTask.framesPlanned ?? null, modelAttemptsJson,
+          safeTask.createdAt
         ]
       );
       return true;
@@ -1264,8 +1369,10 @@ export async function insertLectureTask(task: LectureTaskRecord): Promise<boolea
            total_score, status, progress_pct, curator_email,
            critical_violations, positive_highlights, recommendations, criteria_data,
            talk_metadata, is_corrupted, raw_broken_response,
-           error_message, applicable_count, earned_points, max_points, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           error_message, applicable_count, earned_points, max_points,
+           ai_model, token_usage_json, frames_uploaded, frames_planned, model_attempts_json,
+           created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            status = excluded.status, progress_pct = excluded.progress_pct, total_score = excluded.total_score,
            critical_violations = excluded.critical_violations, positive_highlights = excluded.positive_highlights,
@@ -1276,14 +1383,21 @@ export async function insertLectureTask(task: LectureTaskRecord): Promise<boolea
            error_message = excluded.error_message,
            applicable_count = excluded.applicable_count,
            earned_points = excluded.earned_points,
-           max_points = excluded.max_points`
+           max_points = excluded.max_points,
+           ai_model = COALESCE(excluded.ai_model, lecture_tasks.ai_model),
+           token_usage_json = COALESCE(excluded.token_usage_json, lecture_tasks.token_usage_json),
+           frames_uploaded = COALESCE(excluded.frames_uploaded, lecture_tasks.frames_uploaded),
+           frames_planned = COALESCE(excluded.frames_planned, lecture_tasks.frames_planned),
+           model_attempts_json = COALESCE(excluded.model_attempts_json, lecture_tasks.model_attempts_json)`
       );
       stmt.run(
         safeTask.id, safeTask.lectureUrl, safeTask.teacherName, safeTask.subject, safeTask.groupName, safeTask.date,
         safeTask.totalScore, safeTask.status, safeTask.progressPct, safeTask.curatorEmail,
         critJson, posJson, recJson, criteriaJson,
         talkMetaJson, isCorruptedVal, rawBroken,
-        errMsg, safeTask.applicableCount ?? null, safeTask.earnedPoints ?? null, safeTask.maxPoints ?? null, safeTask.createdAt
+        errMsg, safeTask.applicableCount ?? null, safeTask.earnedPoints ?? null, safeTask.maxPoints ?? null,
+        safeTask.aiModel || null, tokenUsageJson, safeTask.framesUploaded ?? null, safeTask.framesPlanned ?? null, modelAttemptsJson,
+        safeTask.createdAt
       );
       return true;
     }
@@ -1352,13 +1466,18 @@ export async function updateLectureTaskProgressInDB(
   rawBrokenResponse?: string | null,
   teacherName?: string,
   subject?: string,
-  extra?: {
+    extra?: {
     errorMessage?: string | null;
     applicableCount?: number | null;
     earnedPoints?: number | null;
     maxPoints?: number | null;
     groupName?: string;
     date?: string;
+    aiModel?: string | null;
+    tokenUsage?: TokenUsageInfo | null;
+    framesUploaded?: number | null;
+    framesPlanned?: number | null;
+    modelAttempts?: ModelAttemptInfo[] | null;
   }
 ): Promise<void> {
   // Обновляем в памяти
@@ -1382,6 +1501,11 @@ export async function updateLectureTaskProgressInDB(
     if (extra?.maxPoints !== undefined) mem.maxPoints = extra.maxPoints;
     if (extra?.groupName) mem.groupName = extra.groupName;
     if (extra?.date) mem.date = extra.date;
+    if (extra?.aiModel !== undefined) mem.aiModel = extra.aiModel;
+    if (extra?.tokenUsage !== undefined) mem.tokenUsage = extra.tokenUsage;
+    if (extra?.framesUploaded !== undefined) mem.framesUploaded = extra.framesUploaded;
+    if (extra?.framesPlanned !== undefined) mem.framesPlanned = extra.framesPlanned;
+    if (extra?.modelAttempts !== undefined) mem.modelAttempts = extra.modelAttempts;
   }
 
   // Мгновенное сохранение снимка памяти в файл бэкапа
@@ -1395,6 +1519,8 @@ export async function updateLectureTaskProgressInDB(
     const talkMetaJson = talkMetadata ? JSON.stringify(talkMetadata) : null;
     const isCorruptedNum = isCorrupted !== undefined ? (isCorrupted ? 1 : 0) : null;
     const isFinalState = status === 'completed' || status === 'failed';
+    const tokenUsageJson = extra?.tokenUsage ? JSON.stringify(extra.tokenUsage) : null;
+    const modelAttemptsJson = Array.isArray(extra?.modelAttempts) ? JSON.stringify(extra.modelAttempts) : null;
 
     if (isPostgres && pgPool) {
       if (isFinalState) {
@@ -1416,8 +1542,13 @@ export async function updateLectureTaskProgressInDB(
              earned_points = $15,
              max_points = $16,
              group_name = COALESCE($17, group_name),
-             date = COALESCE($18, date)
-           WHERE id = $19`,
+             date = COALESCE($18, date),
+             ai_model = $19,
+             token_usage_json = $20,
+             frames_uploaded = $21,
+             frames_planned = $22,
+             model_attempts_json = $23
+           WHERE id = $24`,
           [
             status,
             progressPct,
@@ -1437,6 +1568,11 @@ export async function updateLectureTaskProgressInDB(
             extra?.maxPoints ?? null,
             extra?.groupName || null,
             extra?.date || null,
+            extra?.aiModel ?? null,
+            tokenUsageJson,
+            extra?.framesUploaded ?? null,
+            extra?.framesPlanned ?? null,
+            modelAttemptsJson,
             taskId
           ]
         );
@@ -1466,7 +1602,12 @@ export async function updateLectureTaskProgressInDB(
              earned_points = ?,
              max_points = ?,
              group_name = COALESCE(?, group_name),
-             date = COALESCE(?, date)
+             date = COALESCE(?, date),
+             ai_model = ?,
+             token_usage_json = ?,
+             frames_uploaded = ?,
+             frames_planned = ?,
+             model_attempts_json = ?
            WHERE id = ?`
         );
         stmt.run(
@@ -1488,6 +1629,11 @@ export async function updateLectureTaskProgressInDB(
           extra?.maxPoints ?? null,
           extra?.groupName || null,
           extra?.date || null,
+          extra?.aiModel ?? null,
+          tokenUsageJson,
+          extra?.framesUploaded ?? null,
+          extra?.framesPlanned ?? null,
+          modelAttemptsJson,
           taskId
         );
       } else {
@@ -1810,6 +1956,67 @@ export async function saveReportSettingsInDB(settings: ReportDisplaySettings, up
     naDescription: (settings.naDescription || '').trim() || DEFAULT_REPORT_SETTINGS.naDescription
   };
   await saveCriteriaConfigInDB('report_settings', normalized, updatedBy);
+  return normalized;
+}
+
+const AI_SETTINGS_FILE = path.join(DATA_DIR, 'ai_settings.json');
+
+export function syncAISettingsFileSync(settings: AISettings): void {
+  try {
+    const tempPath = path.join(DATA_DIR, 'ai_settings.tmp.json');
+    fs.writeFileSync(tempPath, JSON.stringify(settings, null, 2), 'utf-8');
+    fs.copyFileSync(tempPath, AI_SETTINGS_FILE);
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  } catch (err) {
+    console.warn('[БД] Не удалось записать data/ai_settings.json:', err);
+  }
+}
+
+function normalizeAISettings(raw: any): AISettings {
+  const rawMax = Number(raw?.maxRequestTokens);
+  const clampedMax = Number.isFinite(rawMax)
+    ? Math.max(32000, Math.min(256000, Math.round(rawMax)))
+    : DEFAULT_AI_SETTINGS.maxRequestTokens;
+
+  const rawOut = Number(raw?.reservedOutputTokens);
+  const clampedOut = Number.isFinite(rawOut)
+    ? Math.max(2048, Math.min(8192, Math.round(rawOut)))
+    : DEFAULT_AI_SETTINGS.reservedOutputTokens;
+
+  return {
+    maxRequestTokens: clampedMax,
+    reservedOutputTokens: clampedOut,
+    enableModelRotation: raw?.enableModelRotation !== undefined ? Boolean(raw.enableModelRotation) : DEFAULT_AI_SETTINGS.enableModelRotation,
+    updatedAt: typeof raw?.updatedAt === 'string' ? raw.updatedAt : undefined,
+    updatedBy: typeof raw?.updatedBy === 'string' ? raw.updatedBy : undefined
+  };
+}
+
+export async function getAISettingsFromDB(): Promise<AISettings> {
+  try {
+    const raw = await getCriteriaConfigFromDB('ai_settings');
+    if (raw && typeof raw === 'object') {
+      const normalized = normalizeAISettings(raw);
+      syncAISettingsFileSync(normalized);
+      return normalized;
+    }
+  } catch (err) {
+    console.error('[БД] Ошибка чтения AI настроек:', err);
+  }
+  const defaults: AISettings = { ...DEFAULT_AI_SETTINGS };
+  syncAISettingsFileSync(defaults);
+  return defaults;
+}
+
+export async function saveAISettingsInDB(settings: Partial<AISettings>, updatedBy: string): Promise<AISettings> {
+  const normalized: AISettings = normalizeAISettings({
+    ...DEFAULT_AI_SETTINGS,
+    ...settings,
+    updatedAt: new Date().toISOString(),
+    updatedBy
+  });
+  await saveCriteriaConfigInDB('ai_settings', normalized, updatedBy);
+  syncAISettingsFileSync(normalized);
   return normalized;
 }
 

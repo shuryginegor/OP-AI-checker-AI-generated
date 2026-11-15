@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import ssl
 import json
 import logging
@@ -7,7 +8,7 @@ import uuid
 import time
 import traceback
 import urllib.request
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 import certifi
 from PIL import Image
 
@@ -24,6 +25,24 @@ import logger_config
 # Настройка логирования
 logger = logging.getLogger(__name__)
 
+# Строгий приоритет моделей GigaChat:
+# Сначала самые сильные мультимодальные модели (Pro -> Max -> Ultra),
+# обычная модель (GigaChat-2) используется ТОЛЬКО в самом крайнем случае, так как плохо работает с аудио.
+MODEL_ROTATION_CHAIN: List[str] = [
+    "GigaChat-2-Pro",
+    "GigaChat-2-Max",
+    "GigaChat-3-Ultra",
+    "GigaChat-2",
+]
+
+DEFAULT_AI_SETTINGS: Dict[str, Any] = {
+    "maxRequestTokens": 128_000,
+    "reservedOutputTokens": 8_192,
+    "enableModelRotation": True,
+}
+
+AI_SETTINGS_PATH = os.path.join(os.getcwd(), "data", "ai_settings.json")
+
 # URL-адреса сертификатов Минцифры по умолчанию
 DEFAULT_MINCIFRY_ROOT_URL = "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt"
 DEFAULT_MINCIFRY_SUB_URL = "https://gu-st.ru/content/lending/russian_trusted_sub_ca_pem.crt"
@@ -31,6 +50,38 @@ DEFAULT_MINCIFRY_SUB_URL = "https://gu-st.ru/content/lending/russian_trusted_sub
 # Локальная директория для хранения бандла сертификатов
 CERTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs")
 BUNDLE_CERT_PATH = os.path.join(CERTS_DIR, "russian_trusted_bundle.pem")
+
+
+def load_ai_settings() -> Dict[str, Any]:
+    """Читает актуальные настройки лимита токенов и ротации моделей, заданные старшим куратором."""
+    settings = dict(DEFAULT_AI_SETTINGS)
+    try:
+        if os.path.exists(AI_SETTINGS_PATH):
+            with open(AI_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                max_req = int(raw.get("maxRequestTokens", DEFAULT_AI_SETTINGS["maxRequestTokens"]))
+                res_out = int(raw.get("reservedOutputTokens", DEFAULT_AI_SETTINGS["reservedOutputTokens"]))
+                settings["maxRequestTokens"] = max(32_000, min(256_000, max_req))
+                settings["reservedOutputTokens"] = max(2_048, min(8_192, res_out))
+                settings["enableModelRotation"] = bool(raw.get("enableModelRotation", True))
+    except Exception as e:
+        logger.warning(f"[AI Settings] Не удалось прочитать {AI_SETTINGS_PATH}, используем значения по умолчанию: {e}")
+    return settings
+
+
+def get_model_rotation_order(enable_rotation: bool = True) -> List[str]:
+    """Возвращает упорядоченный список моделей для последовательного перебора."""
+    if not enable_rotation:
+        primary = os.getenv("GIGACHAT_MODEL", MODEL_ROTATION_CHAIN[0])
+        return [primary]
+    return list(MODEL_ROTATION_CHAIN)
+
+
+def is_fallback_base_model(model_name: str) -> bool:
+    """Проверяет, является ли модель базовой версией без приставки Pro/Max/Ultra."""
+    m = (model_name or "").strip().lower()
+    return m in ("gigachat", "gigachat-2", "gigachat-lite")
 
 
 def ensure_russian_certificates() -> Optional[str]:
@@ -47,19 +98,16 @@ def ensure_russian_certificates() -> Optional[str]:
         root_cert_path = os.path.join(CERTS_DIR, "russian_trusted_root_ca.pem")
         sub_cert_path = os.path.join(CERTS_DIR, "russian_trusted_sub_ca.pem")
 
-        # Скачиваем корневой сертификат при отсутствии
         if not os.path.exists(root_cert_path) or os.path.getsize(root_cert_path) == 0:
             logger.info(f"Скачивание корневого сертификата Минцифры РФ с {mincifry_root_url}...")
             urllib.request.urlretrieve(mincifry_root_url, root_cert_path)
             logger.debug(f"Корневой сертификат сохранен: {root_cert_path} ({os.path.getsize(root_cert_path)} байт)")
 
-        # Скачиваем подчиненный сертификат при отсутствии
         if not os.path.exists(sub_cert_path) or os.path.getsize(sub_cert_path) == 0:
             logger.info(f"Скачивание подчиненного сертификата Минцифры РФ с {mincifry_sub_url}...")
             urllib.request.urlretrieve(mincifry_sub_url, sub_cert_path)
             logger.debug(f"Подчиненный сертификат сохранен: {sub_cert_path} ({os.path.getsize(sub_cert_path)} байт)")
 
-        # Создаем общий бандл (certifi cacert + сертификаты Минцифры)
         certifi_path = certifi.where()
         with open(BUNDLE_CERT_PATH, "w", encoding="utf-8") as bundle_f:
             if os.path.exists(certifi_path):
@@ -77,19 +125,16 @@ def ensure_russian_certificates() -> Optional[str]:
         return None
 
 
-def get_gigachat_client() -> GigaChat:
+def get_gigachat_client(model_override: Optional[str] = None) -> GigaChat:
     """
     Инициализирует и возвращает экземпляр клиента GigaChat
     с правильными учетными данными, моделью и CA-бандлом сертификатов Минцифры.
     """
     credentials = os.getenv("GIGACHAT_CREDENTIALS")
     scope = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
-    model = os.getenv("GIGACHAT_MODEL", "GigaChat-2-Pro")
-    
-    # Проверка и подготовка сертификатов Минцифры
-    ca_bundle = ensure_russian_certificates()
+    model = model_override or os.getenv("GIGACHAT_MODEL", MODEL_ROTATION_CHAIN[0])
 
-    # Флаг принудительного отключения верификации (если указан в .env)
+    ca_bundle = ensure_russian_certificates()
     verify_ssl_env = os.getenv("GIGACHAT_VERIFY_SSL_CERTS", "true").lower()
     verify_ssl = False if verify_ssl_env in ("0", "false", "no") else True
 
@@ -98,7 +143,7 @@ def get_gigachat_client() -> GigaChat:
         "scope": scope,
         "model": model,
         "verify_ssl_certs": verify_ssl,
-        "timeout": 600.0,
+        "timeout": 300.0,
     }
 
     if ca_bundle and os.path.exists(ca_bundle) and verify_ssl:
@@ -129,7 +174,13 @@ def _optimize_image_for_gigachat_sync(img_path: str) -> str:
         return img_path
 
 
-async def _upload_single_frame(client: GigaChat, sem: asyncio.Semaphore, time_sec: int, img_path: str) -> Optional[Tuple[str, str, str]]:
+async def _upload_single_frame(
+    client: GigaChat,
+    sem: asyncio.Semaphore,
+    time_sec: int,
+    img_path: str,
+    delay_idx: int = 0
+) -> Optional[Tuple[str, str, str]]:
     if not os.path.exists(img_path):
         return None
 
@@ -139,22 +190,49 @@ async def _upload_single_frame(client: GigaChat, sem: asyncio.Semaphore, time_se
     time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours > 0 else f"{minutes:02d}:{seconds:02d}"
 
     target_img_path = await asyncio.to_thread(_optimize_image_for_gigachat_sync, img_path)
-    async with sem:
-        try:
-            with open(target_img_path, "rb") as f:
-                upload_res = await client.aupload_file(f, purpose="general")
-                file_id = upload_res.id_
-                logger.debug(f"[GigaChat] Кадр [{time_str}] загружен. File ID: {file_id}")
-                return (time_str, file_id, img_path)
-        except Exception as upload_err:
-            logger.warning(f"[GigaChat] Ошибка загрузки кадра {img_path} ({time_str}): {upload_err}")
-            return None
-        finally:
-            if target_img_path != img_path and os.path.exists(target_img_path):
+    max_attempts = 4
+    try:
+        async with sem:
+            if delay_idx > 0:
+                await asyncio.sleep(0.25)
+            for attempt in range(1, max_attempts + 1):
                 try:
-                    os.remove(target_img_path)
-                except Exception:
-                    pass
+                    with open(target_img_path, "rb") as f:
+                        upload_res = await asyncio.wait_for(
+                            client.aupload_file((os.path.basename(target_img_path), f, "image/jpeg"), purpose="general"),
+                            timeout=60.0
+                        )
+                        file_id = upload_res.id_
+                        logger.debug(f"[GigaChat] Кадр [{time_str}] загружен. File ID: {file_id}")
+                        return (time_str, file_id, img_path)
+                except Exception as upload_err:
+                    err_str = str(upload_err)
+                    is_retryable = (
+                        "429" in err_str
+                        or "Too Many Requests" in err_str
+                        or "timeout" in err_str.lower()
+                        or isinstance(upload_err, asyncio.TimeoutError)
+                        or "500" in err_str
+                        or "502" in err_str
+                        or "503" in err_str
+                        or "504" in err_str
+                    )
+                    if is_retryable and attempt < max_attempts:
+                        wait_sec = min(12, attempt * 3)
+                        logger.warning(
+                            f"[GigaChat] Ошибка/429 при загрузке кадра {time_str} (попытка {attempt}/{max_attempts}): {upload_err}. Повтор через {wait_sec} сек..."
+                        )
+                        await asyncio.sleep(wait_sec)
+                        continue
+                    logger.warning(f"[GigaChat] Не удалось загрузить кадр {img_path} ({time_str}): {upload_err}")
+                    return None
+    finally:
+        if target_img_path != img_path and os.path.exists(target_img_path):
+            try:
+                os.remove(target_img_path)
+            except Exception:
+                pass
+    return None
 
 
 async def _upload_files_to_gigachat(
@@ -162,44 +240,60 @@ async def _upload_files_to_gigachat(
     audio_path: Optional[str],
     image_paths: List[Tuple[int, str]],
     max_frames: int = 30
-) -> Tuple[Optional[str], List[Tuple[str, str, str]]]:
+) -> Tuple[Optional[str], List[Tuple[str, str, str]], int]:
     """
-    Параллельно загружает аудиодорожку и ключевые кадры в хранилище GigaChat
-    и возвращает (audio_file_id, [(time_str, frame_file_id, img_path)]).
-    Число кадров адаптивно подстраивается под общий бюджет токенов.
+    Загружает полную аудиодорожку (с повторами и таймаутом 180 сек) и равномерно выбранные кадры
+    (через Semaphore(2) с повторами при 429) в хранилище GigaChat.
+    Возвращает (audio_file_id, [(time_str, frame_file_id, img_path)], planned_frames_count).
     """
     audio_file_id = None
     if audio_path and os.path.exists(audio_path):
-        try:
-            audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-            logger.info(f"[GigaChat] Загрузка аудиодорожки {audio_path} ({audio_size_mb:.2f} MB)...")
-            t_audio_start = time.time()
-            with open(audio_path, "rb") as f:
-                upload_res = await client.aupload_file(f, purpose="general")
+        audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        for attempt in range(1, 4):
+            try:
+                logger.info(
+                    f"[GigaChat] Загрузка аудиодорожки {audio_path} ({audio_size_mb:.2f} MB), попытка {attempt}/3..."
+                )
+                t_audio_start = time.time()
+                with open(audio_path, "rb") as f:
+                    upload_res = await asyncio.wait_for(
+                        client.aupload_file((os.path.basename(audio_path), f, "audio/mp3"), purpose="general"),
+                        timeout=240.0
+                    )
                 audio_file_id = upload_res.id_
                 elapsed = time.time() - t_audio_start
                 logger.info(f"[GigaChat] Аудиодорожка успешно загружена за {elapsed:.2f} сек. File ID: {audio_file_id}")
-        except Exception as audio_err:
-            logger.warning(f"[GigaChat] Ошибка загрузки аудиодорожки {audio_path}: {audio_err}")
+                break
+            except Exception as audio_err:
+                logger.warning(f"[GigaChat] Ошибка загрузки аудиодорожки (попытка {attempt}/3): {audio_err}")
+                if attempt < 3:
+                    await asyncio.sleep(attempt * 4)
 
-    # Адаптивно сэмплируем кадры на основе рассчитанного бюджета токенов
-    if len(image_paths) > max_frames:
+    # Адаптивно сэмплируем кадры равномерно по длительности лекции на основе бюджета
+    if max_frames <= 0 or not image_paths:
+        selected_frames: List[Tuple[int, str]] = []
+    elif len(image_paths) > max_frames:
         step = len(image_paths) / max_frames
         selected_frames = [image_paths[int(i * step)] for i in range(max_frames)]
-        logger.info(f"[GigaChat] Найдено {len(image_paths)} кадров. Адаптивное сэмплирование до {len(selected_frames)} кадров под токен-бюджет.")
+        logger.info(
+            f"[GigaChat] Найдено {len(image_paths)} кадров. Адаптивное сэмплирование до {len(selected_frames)} кадров под токен-бюджет."
+        )
     else:
-        selected_frames = image_paths
-        logger.info(f"[GigaChat] Отправка {len(selected_frames)} кадров занятия...")
+        selected_frames = list(image_paths)
+        logger.info(f"[GigaChat] Отправка всех {len(selected_frames)} извлечённых кадров занятия...")
 
+    planned_count = len(selected_frames)
     t_frames_start = time.time()
-    sem = asyncio.Semaphore(8)
-    tasks = [_upload_single_frame(client, sem, t_sec, img_p) for t_sec, img_p in selected_frames]
+    sem = asyncio.Semaphore(2)
+    tasks = [_upload_single_frame(client, sem, t_sec, img_p, delay_idx=idx) for idx, (t_sec, img_p) in enumerate(selected_frames)]
     results = await asyncio.gather(*tasks, return_exceptions=False)
     uploaded_info = [r for r in results if r is not None]
 
     elapsed_frames = time.time() - t_frames_start
-    logger.info(f"[GigaChat] Параллельная загрузка {len(uploaded_info)} поминутных кадров завершена за {elapsed_frames:.2f} сек.")
-    return audio_file_id, uploaded_info
+    logger.info(
+        f"[GigaChat] Загрузка кадров завершена за {elapsed_frames:.2f} сек: успешно {len(uploaded_info)} из {planned_count} запланированных."
+    )
+    return audio_file_id, uploaded_info, planned_count
 
 
 async def _cleanup_gigachat_files(client: GigaChat, uploaded_file_ids: List[str]):
@@ -212,11 +306,320 @@ async def _cleanup_gigachat_files(client: GigaChat, uploaded_file_ids: List[str]
             logger.warning(f"[GigaChat] Не удалось удалить удаленный файл {fid}: {e}")
 
 
+def compact_transcript_preserving_timeline(text: str, max_chars: int) -> Tuple[str, bool]:
+    """
+    Равномерно сжимает длинный транскрипт до max_chars символов,
+    сохраняя хронологию начала, середины и финала занятия с таймкодами.
+    """
+    raw = (text or "").strip()
+    if not raw or max_chars <= 0 or len(raw) <= max_chars:
+        return raw, False
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return raw[:max_chars], True
+
+    header = (
+        f"[ТРАНСКРИПТ РАВНОМЕРНО СОКРАЩЁН С {len(raw)} ДО ~{max_chars} СИМВ. ПОД ТОКЕН-БЮДЖЕТ ЗАПРОСА. "
+        f"ПОЛНАЯ АУДИОДОРОЖКА УРОКА ПЕРЕДАНА ЦЕЛИКОМ — ОПИРАЙСЯ НА НЕЁ КАК НА ПЕРВОИСТОЧНИК.]\n"
+    )
+    avail = max(400, max_chars - len(header))
+
+    # Всегда сохраняем первые 12% реплик, последние 12% реплик и равномерный шаг из середины
+    total_lines = len(lines)
+    if total_lines <= 10:
+        clipped = "\n".join(lines)[:avail]
+        return header + clipped, True
+
+    avg_line_len = max(20, sum(len(l) + 1 for l in lines) / total_lines)
+    target_lines_count = max(8, min(total_lines, int(avail / avg_line_len)))
+
+    head_cnt = max(2, int(target_lines_count * 0.2))
+    tail_cnt = max(2, int(target_lines_count * 0.2))
+    mid_cnt = max(2, target_lines_count - head_cnt - tail_cnt)
+
+    head_lines = lines[:head_cnt]
+    tail_lines = lines[-tail_cnt:]
+    mid_pool = lines[head_cnt: total_lines - tail_cnt]
+
+    selected_mid: List[str] = []
+    if mid_pool and mid_cnt > 0:
+        if len(mid_pool) <= mid_cnt:
+            selected_mid = mid_pool
+        else:
+            step = len(mid_pool) / mid_cnt
+            selected_mid = [mid_pool[int(i * step)] for i in range(mid_cnt)]
+
+    combined = []
+    combined.extend(head_lines)
+    if selected_mid:
+        combined.append("... [часть реплик середины сжата; аудиозапись полная] ...")
+        combined.extend(selected_mid)
+    if tail_lines:
+        combined.append("... [переход к завершающей части урока] ...")
+        combined.extend(tail_lines)
+
+    body = "\n".join(combined)
+    if len(body) > avail:
+        body = body[:avail].rsplit("\n", 1)[0] or body[:avail]
+
+    return header + body, True
+
+
+def plan_multimodal_budget(
+    transcript_text: str,
+    summary_text: str,
+    static_prompt_chars: int,
+    audio_path: Optional[str],
+    total_extracted_frames: int,
+    max_request_tokens: Optional[int] = None,
+    reserved_output_tokens: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Рассчитывает токен-бюджет одного запроса по строгому приоритету старшего куратора:
+    1. АУДИО НИКОГДА НЕ РЕЖЕТСЯ И НЕ ОБРЕЗАЕТСЯ — отправляется целиком.
+    2. Если материалы превышают доступный лимит (maxRequestTokens - reservedOutputTokens),
+       сначала сжимается ТЕКСТОВЫЙ ТРАНСКРИПТ (сохраняя начало/середину/конец с таймкодами).
+    3. Если после сжатия транскрипта бюджет всё ещё превышен — уменьшается число КАДРОВ.
+    4. Если лимит увеличен (например > 128 000 токенов) — число кадров (до 60) и транскрипт пропорционально расширяются.
+    """
+    settings = load_ai_settings()
+    budget_total = max_request_tokens if max_request_tokens is not None else settings["maxRequestTokens"]
+    reserved_out = reserved_output_tokens if reserved_output_tokens is not None else settings["reservedOutputTokens"]
+    budget_total = max(32_000, min(256_000, int(budget_total)))
+    reserved_out = max(2_048, min(8_192, int(reserved_out)))
+
+    available_input = max(12_000, budget_total - reserved_out)
+    CHARS_PER_TOKEN = 2.2
+    FRAME_TOKEN_COST = 1_100
+
+    # 1. Аудиодорожка: НИКОГДА не обрезаем! Оценка ~1450 ток/МБ (или ~350 ток/мин).
+    audio_size_mb = 0.0
+    audio_duration_sec = 0.0
+    audio_tokens = 0
+    if audio_path and os.path.exists(audio_path):
+        audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        audio_duration_sec = file_processing._get_video_duration_seconds(audio_path)
+        est_by_mb = int(audio_size_mb * 1_450)
+        est_by_dur = int((audio_duration_sec / 60.0) * 350) if audio_duration_sec > 0 else 0
+        audio_tokens = max(est_by_mb, est_by_dur, 500)
+
+    # 2. Базовые текстовые токены
+    static_tokens = int(static_prompt_chars / CHARS_PER_TOKEN) + 600
+    summary_raw = (summary_text or "").strip()
+    summary_tokens = int(len(summary_raw) / CHARS_PER_TOKEN)
+
+    orig_transcript = (transcript_text or "").strip()
+    orig_transcript_tokens = int(len(orig_transcript) / CHARS_PER_TOKEN)
+
+    # Целевое число кадров зависит от настроенного бюджета (30 при 128k, до 60 при 256k, меньше при 64k)
+    scaled_cap = max(10, min(60, int(round((budget_total / 128_000.0) * 30))))
+    desired_frames = min(total_extracted_frames, scaled_cap) if total_extracted_frames > 0 else 0
+
+    remaining_after_audio_static = available_input - audio_tokens - static_tokens - summary_tokens
+
+    final_summary = summary_raw
+    final_transcript = orig_transcript
+    transcript_trimmed = False
+    target_frames = desired_frames
+
+    # Проверяем, нужно ли сжатие
+    total_with_desired = audio_tokens + static_tokens + summary_tokens + orig_transcript_tokens + (target_frames * FRAME_TOKEN_COST)
+
+    if total_with_desired > available_input:
+        # Шаг 1: Сначала пробуем уложиться, сжимая ТОЛЬКО транскрипт (сохраняя min_transcript_floor ~6000 токенов для таймкодов)
+        min_transcript_tokens = min(orig_transcript_tokens, max(2_500, int(available_input * 0.10)))
+        room_for_transcript = remaining_after_audio_static - (target_frames * FRAME_TOKEN_COST)
+
+        if room_for_transcript >= min_transcript_tokens:
+            # Достаточно сжать только транскрипт, все desired_frames сохраняются!
+            max_chars = int(room_for_transcript * CHARS_PER_TOKEN)
+            final_transcript, transcript_trimmed = compact_transcript_preserving_timeline(orig_transcript, max_chars)
+        else:
+            # Транскрипт сжимается до безопасного минимума, затем пропорционально уменьшаем число кадров
+            if orig_transcript:
+                max_chars = int(min_transcript_tokens * CHARS_PER_TOKEN)
+                final_transcript, transcript_trimmed = compact_transcript_preserving_timeline(orig_transcript, max_chars)
+            used_transcript_tokens = int(len(final_transcript) / CHARS_PER_TOKEN)
+
+            # Шаг 2: Урезаем кадры под остаток после нетронутого аудио + базового промпта + сжатого транскрипта
+            room_for_frames = remaining_after_audio_static - used_transcript_tokens
+            if total_extracted_frames > 0:
+                min_frames_floor = min(3, total_extracted_frames)
+                calculated_frames = room_for_frames // FRAME_TOKEN_COST
+                target_frames = max(min_frames_floor, min(desired_frames, calculated_frames))
+            else:
+                target_frames = 0
+
+            # Если даже с минимумом кадров (3 шт.) все ещё не влезаем (очень маленький бюджет и сверхдлинное аудио),
+            # дожимаем транскрипт/саммари (но аудио всё равно не трогаем!).
+            recalc_room_for_text = available_input - audio_tokens - static_tokens - (target_frames * FRAME_TOKEN_COST)
+            if recalc_room_for_text < summary_tokens + int(len(final_transcript) / CHARS_PER_TOKEN):
+                if final_transcript:
+                    avail_for_tr = max(800, recalc_room_for_text - min(summary_tokens, 2_000))
+                    final_transcript, transcript_trimmed = compact_transcript_preserving_timeline(
+                        orig_transcript, int(avail_for_tr * CHARS_PER_TOKEN)
+                    )
+                if len(final_summary) > 4_000 and recalc_room_for_text < 4_000:
+                    final_summary = final_summary[:3_500] + "\n... [пересказ сокращён под лимит токенов]"
+
+    final_text_tokens = static_tokens + int(len(final_summary) / CHARS_PER_TOKEN) + int(len(final_transcript) / CHARS_PER_TOKEN)
+    frames_tokens = target_frames * FRAME_TOKEN_COST
+    estimated_input_tokens = audio_tokens + final_text_tokens + frames_tokens
+
+    logger.info(
+        f"[Token Budget] Лимит запроса: {budget_total} (резерв ответа: {reserved_out}). "
+        f"Аудио (целиком): ~{audio_tokens} ток. ({audio_size_mb:.2f} MB), "
+        f"текст: ~{final_text_tokens} ток. (транскрипт {'сжат' if transcript_trimmed else 'полный'}: "
+        f"{len(final_transcript)}/{len(orig_transcript)} симв.), "
+        f"кадры: {target_frames} шт. (~{frames_tokens} ток.). "
+        f"Итого вход: ~{estimated_input_tokens} ток."
+    )
+
+    return {
+        "maxFrames": target_frames,
+        "transcriptText": final_transcript,
+        "summaryText": final_summary,
+        "transcriptTrimmed": transcript_trimmed,
+        "transcriptOriginalChars": len(orig_transcript),
+        "transcriptSentChars": len(final_transcript),
+        "audioEstimatedTokens": audio_tokens,
+        "textEstimatedTokens": final_text_tokens,
+        "framesEstimatedTokens": frames_tokens,
+        "estimatedInputTokens": estimated_input_tokens,
+        "configuredBudgetTokens": budget_total,
+        "reservedOutputTokens": reserved_out,
+    }
+
+
+def _calculate_dynamic_frame_limit(
+    transcript_text: str,
+    summary_text: str,
+    system_prompt_len: int,
+    audio_path: Optional[str]
+) -> int:
+    """Совместимый обёрточный расчёт числа кадров через единый планировщик бюджета."""
+    plan = plan_multimodal_budget(
+        transcript_text=transcript_text,
+        summary_text=summary_text,
+        static_prompt_chars=system_prompt_len,
+        audio_path=audio_path,
+        total_extracted_frames=60,
+    )
+    return plan["maxFrames"]
+
+
+async def fetch_live_gigachat_status() -> Dict[str, Any]:
+    """
+    Диагностирует фактический статус учётной записи Sber GigaChat API:
+    - Доступные модели (`GET /models`)
+    - Остатки пакетных токенов (`GET /balance` — для Freemium/pay-as-you-go Сбер честно отдаёт 403).
+    """
+    creds = os.getenv("GIGACHAT_CREDENTIALS")
+    scope = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
+    checked_at = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if not creds:
+        return {
+            "success": False,
+            "scope": scope,
+            "availableModels": [],
+            "balances": [],
+            "balanceSupported": False,
+            "balanceHttpStatus": None,
+            "balanceNote": "Переменная окружения GIGACHAT_CREDENTIALS не задана на сервере.",
+            "error": "GIGACHAT_CREDENTIALS не настроены на сервере.",
+            "checkedAt": checked_at,
+        }
+
+    client: Optional[GigaChat] = None
+    available_models: List[str] = []
+    balances: List[Dict[str, Any]] = []
+    balance_supported = False
+    balance_http_status: Optional[int] = None
+    balance_note = ""
+
+    try:
+        client = get_gigachat_client(MODEL_ROTATION_CHAIN[0])
+
+        try:
+            models_resp = await asyncio.wait_for(client.aget_models(), timeout=20.0)
+            raw_data = getattr(models_resp, "data", None) or []
+            available_models = [str(getattr(m, "id_", "") or getattr(m, "id", "")) for m in raw_data if (getattr(m, "id_", None) or getattr(m, "id", None))]
+        except AuthenticationError as auth_err:
+            return {
+                "success": False,
+                "scope": scope,
+                "availableModels": [],
+                "balances": [],
+                "balanceSupported": False,
+                "balanceHttpStatus": 401,
+                "balanceNote": "Ошибка OAuth-авторизации в Sber GigaChat (401). Проверьте GIGACHAT_CREDENTIALS и GIGACHAT_SCOPE.",
+                "error": str(auth_err),
+                "checkedAt": checked_at,
+            }
+        except Exception as mod_err:
+            logger.warning(f"[GigaChat Status] Ошибка GET /models: {mod_err}")
+
+        try:
+            bal_resp = await asyncio.wait_for(client.aget_balance(), timeout=20.0)
+            raw_bal = getattr(bal_resp, "balance", None) or []
+            for item in raw_bal:
+                balances.append({
+                    "usage": str(getattr(item, "usage", "")),
+                    "value": int(getattr(item, "value", 0) or 0),
+                })
+            balance_supported = True
+            balance_http_status = 200
+            balance_note = "Остаток токенов получен напрямую через метод Сбер API GET /v1/balance."
+        except ResponseError as bal_err:
+            status_code = getattr(bal_err, "status_code", None)
+            balance_http_status = status_code
+            balance_supported = False
+            if status_code == 403:
+                balance_note = (
+                    "API Сбера вернул HTTP 403 на GET /balance: живой остаток токенов API отдаёт ТОЛЬКО "
+                    "для предоплатных корпоративных пакетов. На бесплатном Freemium (GIGACHAT_API_PERS) или pay-as-you-go "
+                    "живой счётчик Сбер не предоставляет — ниже показан локальный учёт потраченных токенов по каждой модели."
+                )
+            else:
+                balance_note = f"Метод GET /balance вернул HTTP {status_code}: {bal_err}"
+        except Exception as bal_other:
+            balance_supported = False
+            balance_note = f"Не удалось получить остаток токенов GET /balance: {bal_other}"
+
+        return {
+            "success": True,
+            "scope": scope,
+            "availableModels": available_models,
+            "balances": balances,
+            "balanceSupported": balance_supported,
+            "balanceHttpStatus": balance_http_status,
+            "balanceNote": balance_note,
+            "checkedAt": checked_at,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "scope": scope,
+            "availableModels": available_models,
+            "balances": balances,
+            "balanceSupported": balance_supported,
+            "balanceHttpStatus": balance_http_status,
+            "balanceNote": str(e),
+            "error": str(e),
+            "checkedAt": checked_at,
+        }
+    finally:
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
+
 async def _execute_gigachat_task(bot, job_name: str, client: GigaChat, chat_payload: Chat, uploaded_file_ids: List[str], tg_id: int, db_id: int, frames_count: int = 0):
-    """
-    Асинхронно отправляет запрос к GigaChat API, получает ответ,
-    парсит JSON, сохраняет результаты в БД и уведомляет пользователя.
-    """
+    """Устаревшая обёртка совместимости для Telegram-бота (если используется worker)."""
     t_start = time.time()
     logger.info(f"[GigaChat [{job_name}] DB_ID={db_id}] Старт отправки запроса к модели {chat_payload.model} (Вложений: {len(uploaded_file_ids)})...")
     try:
@@ -236,81 +639,25 @@ async def _execute_gigachat_task(bot, job_name: str, client: GigaChat, chat_payl
                 else:
                     raise attempt_err
 
-        gen_time = time.time() - t_start
-        logger.info(f"[GigaChat [{job_name}]] Ответ успешно получен за {gen_time:.2f} сек!")
-
-        if hasattr(response, "usage") and response.usage:
-            logger.info(f"[GigaChat [{job_name}]] Использовано токенов: {response.usage}")
-            logger.debug(f"[GigaChat [{job_name}] Usage Details] prompt_tokens={getattr(response.usage, 'prompt_tokens', None)}, completion_tokens={getattr(response.usage, 'completion_tokens', None)}, total_tokens={getattr(response.usage, 'total_tokens', None)}")
-
         choices = response.choices if hasattr(response, "choices") else []
         if not choices:
             err_msg = f"Ответ GigaChat не содержит вариантов choices: {response}"
-            logger.error(f"[GigaChat [{job_name}]] {err_msg}")
             await ai_common.save_and_notify_failure(bot, tg_id, db_id, "GigaChat API", err_msg)
             return
 
         choice = choices[0]
-        finish_reason = getattr(choice, "finish_reason", None)
-        logger.info(f"[GigaChat [{job_name}]] Finish reason: {finish_reason}")
-        
         choice_message = choice.message if hasattr(choice, "message") else None
         choice_content = choice_message.content if choice_message else ""
-
         if not choice_content:
-            err_msg = f"GigaChat вернул пустое текстовое содержимое: {choice}"
-            logger.error(f"[GigaChat [{job_name}]] {err_msg}")
-            await ai_common.save_and_notify_failure(bot, tg_id, db_id, "GigaChat API", err_msg)
+            await ai_common.save_and_notify_failure(bot, tg_id, db_id, "GigaChat API", "Пустой ответ от модели")
             return
 
-        # Проверка на отказ/цензуру безопасности GigaChat
-        refusal_keywords = [
-            "разговоры на чувствительные темы",
-            "ограничены из соображений безопасности",
-            "не могу ответить на данный вопрос",
-            "не могу выполнить данный запрос",
-            "модели не обладают собственным мнением",
-            "чувствительные темы могут быть ограничены"
-        ]
-        is_refused = (
-            finish_reason in ["blacklist", "content_filter", "censorship"]
-            or any(kw in choice_content.lower() for kw in refusal_keywords)
-        )
-
-        if is_refused:
-            err_msg = (
-                f"Нейросеть GigaChat отказалась от проверки лекции из-за цензуры/чувствительной темы (finish_reason: {finish_reason}). "
-                f"Текст модели: {choice_content}"
-            )
-            logger.warning(f"[GigaChat [{job_name}]] {err_msg}")
-            user_facing_err = (
-                f"⚠️ Нейросеть GigaChat отказалась от проверки лекции из соображений безопасности/цензуры по чувствительным темам "
-                f"(причина: {finish_reason or 'blacklist'}).\n\n"
-                f"Пояснение модели: {choice_content}"
-            )
-            await ai_common.save_and_notify_failure(bot, tg_id, db_id, "GigaChat API (Цензура безопасности)", user_facing_err)
-            return
-
-        logger.debug(f"[GigaChat [{job_name}]] Полный сырой ответ:\n{choice_content}")
-        logger.info(f"[GigaChat [{job_name}]] Длина ответа: {len(choice_content)} символов.")
-
-        # Парсим JSON-структуру с помощью единого парсера ai_common
-        try:
-            parsed_result = ai_common.parse_analysis_json(choice_content)
-        except Exception as parse_err:
-            logger.error(f"[GigaChat [{job_name}]] Ошибка парсинга JSON: {parse_err}.\nПолный ответ:\n{choice_content}")
-            raise parse_err
-
+        parsed_result = ai_common.parse_analysis_json(choice_content)
         await ai_common.save_and_notify_success(bot, tg_id, db_id, parsed_result, f"GigaChat ({chat_payload.model})", frames_count=frames_count)
-        logger.info(f"Запрос {job_name} (DB ID: {db_id}) успешно выполнен через GigaChat и сохранен в БД! (Штраф: {parsed_result.get('point')}, Критично: {parsed_result.get('is_critical')})")
-
     except Exception as e:
-        tb = traceback.format_exc()
-        logger.error(f"[GigaChat [{job_name}]] Ошибка при выполнении запроса: {e}\n{tb}")
         err_detail = f"{type(e).__name__}: {str(e)}" if str(e) else repr(e)
         await ai_common.save_and_notify_failure(bot, tg_id, db_id, "GigaChat API", err_detail)
     finally:
-        # Очистка загруженных в GigaChat файлов (152-ФЗ) и закрытие сессии клиента
         if uploaded_file_ids:
             await _cleanup_gigachat_files(client, uploaded_file_ids)
         try:
@@ -319,66 +666,15 @@ async def _execute_gigachat_task(bot, job_name: str, client: GigaChat, chat_payl
             pass
 
 
-def _calculate_dynamic_frame_limit(
-    transcript_text: str,
-    summary_text: str,
-    system_prompt_len: int,
-    audio_path: Optional[str]
-) -> int:
-    """
-    Рассчитывает допустимое число кадров на основе занятых текстовых/аудио токенов,
-    гарантируя резерв в 8 000 токенов под генерацию и рассуждения модели.
-    """
-    TOTAL_CONTEXT_LIMIT = 128_000
-    RESERVED_FOR_OUTPUT = 8_000
-
-    # 1. Текстовые токены (~1 токен на 2.2 символа русского текста)
-    text_chars = len(transcript_text) + len(summary_text) + system_prompt_len
-    text_tokens = int(text_chars / 2.2)
-
-    # 2. Аудио токены (~750 токенов на 1 МБ MP3)
-    audio_tokens = 0
-    if audio_path and os.path.exists(audio_path):
-        audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-        audio_tokens = int(audio_size_mb * 750)
-
-    used_tokens = text_tokens + audio_tokens
-    available_for_frames = TOTAL_CONTEXT_LIMIT - RESERVED_FOR_OUTPUT - used_tokens
-
-    FRAME_TOKEN_COST = 1100  # 1 кадр в GigaChat Vision ~ 1100 токенов
-
-    if available_for_frames <= 0:
-        logger.warning(f"[Token Budget] Высокая загрузка контекста ({used_tokens} токенов). Выделяем минимум 5 кадров.")
-        return 5
-
-    calculated_frames = available_for_frames // FRAME_TOKEN_COST
-    target_frames = max(5, min(30, calculated_frames))
-    logger.info(
-        f"[Token Budget] Оценка входных токенов: текст ~{text_tokens}, аудио ~{audio_tokens} (всего ~{used_tokens}). "
-        f"Зарезервировано под ответ: {RESERVED_FOR_OUTPUT} токенов. "
-        f"Адаптивный лимит кадров: {target_frames} шт."
-    )
-    return target_frames
-
-
 async def process(artifacts: dict, additional_info: str = "", bot=None, tg_id: int = None, db_id: int = None, await_completion: bool = False) -> str:
-    """
-    Подготавливает медиа и текстовые артефакты, формирует запрос для GigaChat
-    и запускает асинхронную (или последовательную при await_completion=True) обработку.
-    """
+    """Точка входа совместимости."""
     credentials = os.getenv("GIGACHAT_CREDENTIALS")
     if not credentials:
-        err_msg = "GIGACHAT_CREDENTIALS не установлен в переменных окружения."
-        logger.error(err_msg)
-        if bot and tg_id and db_id:
-            await ai_common.save_and_notify_failure(bot, tg_id, db_id, "GigaChat API", err_msg)
-        raise ValueError(err_msg)
+        raise ValueError("GIGACHAT_CREDENTIALS не установлен в переменных окружения.")
 
     video_path = artifacts.get("video")
     if not video_path:
         raise ValueError("Файл видео отсутствует в артефактах.")
-
-    logger.debug(f"[GigaChat Process] Начинаем подготовку артефактов для DB_ID={db_id}...")
 
     audio_path = None
     image_paths: List[Tuple[int, str]] = []
@@ -387,122 +683,59 @@ async def process(artifacts: dict, additional_info: str = "", bot=None, tg_id: i
     task_dispatched = False
 
     try:
-        # Извлекаем аудио и кадры
         audio_path, image_paths = await file_processing.extract_media_async(video_path)
-
         transcript_text = ""
         summary_text = ""
         if artifacts.get("transcript") and os.path.exists(artifacts["transcript"]):
             with open(artifacts["transcript"], "r", encoding="utf-8") as f:
                 transcript_text = f.read()
-            logger.debug(f"[GigaChat Process] Загружен транскрипт ({len(transcript_text)} символов)")
-
         if artifacts.get("summary") and os.path.exists(artifacts["summary"]):
             with open(artifacts["summary"], "r", encoding="utf-8") as f:
                 summary_text = f.read()
-            logger.debug(f"[GigaChat Process] Загружено саммари ({len(summary_text)} символов)")
 
         std_criteria_list, _ = criteria.get_dynamic_criteria()
-        criteria_count = len(std_criteria_list)
         system_prompt = criteria.build_system_prompt(additional_info)
-        logger.debug(f"[GigaChat Process] Системный промпт сформирован ({len(system_prompt)} символов, критериев: {criteria_count})")
+        budget_plan = plan_multimodal_budget(
+            transcript_text=transcript_text,
+            summary_text=summary_text,
+            static_prompt_chars=len(system_prompt),
+            audio_path=audio_path,
+            total_extracted_frames=len(image_paths),
+        )
 
-        # Рассчитываем адаптивный лимит кадров под токен-бюджет
-        max_frames = _calculate_dynamic_frame_limit(transcript_text, summary_text, len(system_prompt), audio_path)
-
-        # Инициализация GigaChat клиента
-        client = get_gigachat_client()
-        model_name = os.getenv("GIGACHAT_MODEL", "GigaChat-2-Pro")
-
-        # Загружаем аудиодорожку и кадры в хранилище файлов GigaChat
-        logger.info(f"Загрузка аудиодорожки и до {max_frames} кадров в хранилище GigaChat...")
-        audio_file_id, uploaded_frames_data = await _upload_files_to_gigachat(client, audio_path, image_paths, max_frames=max_frames)
-
+        client = get_gigachat_client(MODEL_ROTATION_CHAIN[0])
+        audio_file_id, uploaded_frames_data, _ = await _upload_files_to_gigachat(
+            client, audio_path, image_paths, max_frames=budget_plan["maxFrames"]
+        )
         if audio_file_id:
             uploaded_file_ids.append(audio_file_id)
         uploaded_file_ids.extend([fid for _, fid, _ in uploaded_frames_data])
 
-        # Формируем структуру сообщений
         messages: List[Messages] = [
-            Messages(
-                role=MessagesRole.SYSTEM,
-                content=system_prompt
-            )
-        ]
-
-        audio_desc = f"- Полная оригинальная аудиодорожка встречи прикреплена (ID файла: {audio_file_id})\n" if audio_file_id else "- Аудиодорожка не была извлечена.\n"
-        frames_description = "\n".join([f"- Кадр [{t_str}] (ID файла: {fid})" for t_str, fid, _ in uploaded_frames_data])
-        if not frames_description:
-            frames_description = "Кадры видео отсутствуют."
-
-        user_text = (
-            "--- МУЛЬТИМОДАЛЬНЫЕ МАТЕРИАЛЫ ВСТРЕЧИ ---\n"
-            f"ОСНОВНОЙ МАТЕРИАЛ (АУДИО):\n{audio_desc}\n"
-            "ВАЖНОЕ ПРИМЕЧАНИЕ О КАДРАХ ВИДЕОЗАПИСИ:\n"
-            "Прикреплены ключевые репрезентативные кадры экрана с указанием точного времени (слайды, окна, доска).\n"
-            f"Список прикрепленных кадров:\n{frames_description}\n\n"
-            f"--- ДОПОЛНИТЕЛЬНЫЙ ТЕКСТОВЫЙ МАТЕРИАЛ (ТРАНСКРИПТ И САММАРИ) ---\n"
-            f"ИИ-Краткий пересказ встречи:\n{summary_text if summary_text else 'Отсутствует'}\n\n"
-            f"Транскрипт общения с таймкодами реплик:\n{transcript_text if transcript_text else 'Отсутствует'}\n\n"
-            "ИНСТРУКЦИЯ ПО АНАЛИЗУ:\n"
-            "1. Внимательно сопоставь реплики из транскрипта и события в аудио/на кадрах с критериями оценивания.\n"
-            "2. Найди ВСЕ моменты панибратства, флуда, задержек при поиске файлов, посторонних звуков/людей на фоне, игнорирования учеников, срыва ДЗ.\n"
-            "3. Выстави строгие штрафные баллы в `criteria_scores` и укажи точные таймкоды нарушений в `comment` и `details`.\n\n"
-            "СТРОГОЕ ТРЕБОВАНИЕ К ФОРМАТУ:\n"
-            "Твой ответ должен состоять ИСКЛЮЧИТЕЛЬНО из валидного JSON-объекта (начинается с { и заканчивается на }). "
-            f"Обязательно включи массив 'criteria_scores' с детальной оценкой по каждому из {criteria_count} критериев.\n\n"
-            f"{ai_common.get_json_output_prompt_instructions()}"
-        )
-
-        messages.append(
+            Messages(role=MessagesRole.SYSTEM, content=system_prompt),
             Messages(
                 role=MessagesRole.USER,
-                content=user_text,
-                attachments=uploaded_file_ids if uploaded_file_ids else None
-            )
-        )
-
-        logger.debug(f"[GigaChat Payload] system_len={len(system_prompt)}, user_len={len(user_text)}, attachments_count={len(uploaded_file_ids)}")
-
-        chat_payload = Chat(
-            model=model_name,
-            messages=messages,
-            max_tokens=8192,
-            temperature=0.1
-        )
-
+                content=(
+                    f"Саммари:\n{budget_plan['summaryText']}\n\n"
+                    f"Транскрипт:\n{budget_plan['transcriptText']}\n\n"
+                    f"{ai_common.get_json_output_prompt_instructions()}"
+                ),
+                attachments=uploaded_file_ids if uploaded_file_ids else None,
+            ),
+        ]
+        chat_payload = Chat(model=MODEL_ROTATION_CHAIN[0], messages=messages, max_tokens=8192, temperature=0.1)
         job_name = f"gigachat_{uuid.uuid4().hex[:12]}"
-
-        # Удаляем локальные временные медиа-файлы с диска сразу после загрузки в облако GigaChat (152-ФЗ)
-        await file_processing.delete_files([
-            audio_path,
-            artifacts.get("audio"),
-            artifacts.get("video"),
-            artifacts.get("transcript"),
-            artifacts.get("summary"),
-            *[p for _, p in image_paths]
-        ])
-
         if bot and tg_id and db_id:
+            task_dispatched = True
+            coro = _execute_gigachat_task(
+                bot, job_name, client, chat_payload, uploaded_file_ids, tg_id, db_id, frames_count=len(uploaded_frames_data)
+            )
             if await_completion:
-                task_dispatched = True
-                await _execute_gigachat_task(
-                    bot, job_name, client, chat_payload, uploaded_file_ids, tg_id, db_id,
-                    frames_count=len(uploaded_frames_data)
-                )
+                await coro
             else:
-                task_dispatched = True
-                asyncio.create_task(
-                    _execute_gigachat_task(
-                        bot, job_name, client, chat_payload, uploaded_file_ids, tg_id, db_id,
-                        frames_count=len(uploaded_frames_data)
-                    )
-                )
-
-        logger.info(f"GigaChat задача инициализирована: {job_name}")
+                asyncio.create_task(coro)
         return job_name
     finally:
-        # Гарантированная очистка локальных файлов даже при сбое до запуска фоновой задачи
         await file_processing.delete_files([
             audio_path,
             artifacts.get("audio"),
@@ -520,22 +753,10 @@ async def process(artifacts: dict, additional_info: str = "", bot=None, tg_id: i
                 pass
 
 
-async def check_batch_jobs_loop(bot):
-    """
-    Проверка незавершенных задач при ЗАПУСКЕ бота.
-    Если бот был перезапущен во время выполнения задачи (point = -1),
-    мы сообщаем пользователю о сбое из-за перезапуска.
-    """
-    try:
-        active_jobs = await database.get_jobs()
-        for job in active_jobs:
-            job_name = job.get("job_name", "")
-            if job_name and job_name.startswith("gigachat_"):
-                logger.error(f"GigaChat задача {job_name} была прервана из-за перезапуска бота.")
-                db_id = job["id"]
-                tg_id = job["telegram_id"]
-                await ai_common.save_and_notify_failure(
-                    bot, tg_id, db_id, "GigaChat API", "Задача была прервана из-за перезапуска сервиса бота."
-                )
-    except Exception as e:
-        logger.error(f"Ошибка при стартовой проверке задач GigaChat: {e}")
+if __name__ == "__main__":
+    if "--status" in sys.argv:
+        from dotenv import load_dotenv
+        load_dotenv()
+        status_res = asyncio.run(fetch_live_gigachat_status())
+        print(json.dumps(status_res, ensure_ascii=False))
+

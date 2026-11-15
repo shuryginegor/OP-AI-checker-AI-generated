@@ -40,6 +40,10 @@ import {
   getReportSettingsFromDB,
   saveReportSettingsInDB,
   DEFAULT_REPORT_SETTINGS,
+  getAISettingsFromDB,
+  saveAISettingsInDB,
+  DEFAULT_AI_SETTINGS,
+  AISettings,
   createLectureTasksBackup,
   hydrateLectureTasksFromBackup,
   purgeDatabaseToCleanState,
@@ -59,6 +63,38 @@ import {
 
 import { sendOTPEmail } from "./email_service";
 import { STANDARD_CRITERIA_LIST } from "./tasks_store";
+
+function resolvePythonBin(): string {
+  const candidates = [
+    path.join(process.cwd(), ".venv", "bin", "python3"),
+    "/opt/venv/bin/python3"
+  ];
+  return candidates.find(p => fs.existsSync(p)) || "python3";
+}
+
+function ensurePythonDependenciesOnce(): void {
+  const pythonBin = resolvePythonBin();
+  const checkCmd = "import dotenv, gigachat, httpx, moviepy, PIL, pydantic, json_repair, certifi";
+  execFile(pythonBin, ["-c", checkCmd], { cwd: process.cwd() }, (err) => {
+    if (!err) {
+      console.log(`[Python Env] ✅ Все Python-зависимости доступны (${pythonBin}).`);
+      return;
+    }
+    console.warn(`[Python Env] ⚠️ Не все Python-модули найдены (${err.message}). Пробуем доустановить из requirements.txt...`);
+    const venvPip = path.join(process.cwd(), ".venv", "bin", "pip");
+    const pipBin = fs.existsSync(venvPip) ? venvPip : "pip3";
+    const pipArgs = fs.existsSync(venvPip)
+      ? ["install", "--no-cache-dir", "-r", "requirements.txt"]
+      : ["install", "--no-cache-dir", "--break-system-packages", "-r", "requirements.txt"];
+    execFile(pipBin, pipArgs, { cwd: process.cwd(), timeout: 180_000 }, (pipErr, _stdout, pipStderr) => {
+      if (pipErr) {
+        console.error(`[Python Env] ❌ Автоустановка Python-зависимостей не удалась: ${pipErr.message}\n${pipStderr || ""}`);
+      } else {
+        console.log("[Python Env] ✅ Python-зависимости успешно доустановлены из requirements.txt.");
+      }
+    });
+  });
+}
 
 async function startServer() {
   // 0. Инициализация реляционной БД (PostgreSQL 16 или встроенный SQLite fallback)
@@ -107,6 +143,12 @@ async function startServer() {
         console.log("[Инициализация] prompt_active.txt восстановлен из БД на диск.");
       }
     }
+
+    // Синхронизируем динамический лимит токенов и ротацию моделей в data/ai_settings.json
+    const initAiSettings = await getAISettingsFromDB();
+    console.log(
+      `[Инициализация] Настройки ИИ синхронизированы: лимит=${initAiSettings.maxRequestTokens} ток., резерв ответа=${initAiSettings.reservedOutputTokens} ток., ротация=${initAiSettings.enableModelRotation ? "вкл" : "выкл"}.`
+    );
   } catch (dbErr) {
     console.error("[Инициализация] Критическая ошибка БД:", dbErr);
   }
@@ -225,6 +267,30 @@ async function startServer() {
       });
     }
     next();
+  };
+
+  // Санитайзер задач: точная модель (aiModel) видна всем кураторам, а телеметрия токенов/кадров/попыток — ТОЛЬКО старшим кураторам
+  const sanitizeTaskForCuratorRole = <T extends LectureTaskRecord & { queuePosition?: number }>(
+    task: T,
+    role?: string
+  ): T => {
+    if (role === "senior_curator") {
+      return task;
+    }
+    const cleanTalkMeta = task.talkMetadata ? { ...task.talkMetadata } : null;
+    if (cleanTalkMeta) {
+      delete cleanTalkMeta.framesUploaded;
+      delete cleanTalkMeta.framesPlanned;
+    }
+    const copy: any = {
+      ...task,
+      talkMetadata: cleanTalkMeta
+    };
+    delete copy.tokenUsage;
+    delete copy.framesUploaded;
+    delete copy.framesPlanned;
+    delete copy.modelAttempts;
+    return copy as T;
   };
 
   // -------------------------------------------------------------
@@ -706,6 +772,7 @@ async function startServer() {
 
   // Список всех проверок из БД с актуальной позицией в FIFO-очереди
   app.get("/api/tasks", requireAuth, async (req, res) => {
+    const currentUser: CuratorRecord = (req as any).user;
     const tasks = await getLectureTasks();
     const pendingSorted = tasks
       .filter(t => t.status === "pending")
@@ -716,9 +783,10 @@ async function startServer() {
     const positionMap = new Map<string, number>();
     pendingSorted.forEach((t, idx) => positionMap.set(t.id, idx + 1));
 
-    const enrichedTasks = tasks.map(t =>
-      t.status === "pending" ? { ...t, queuePosition: positionMap.get(t.id) || 1 } : t
-    );
+    const enrichedTasks = tasks.map(t => {
+      const withPos = t.status === "pending" ? { ...t, queuePosition: positionMap.get(t.id) || 1 } : t;
+      return sanitizeTaskForCuratorRole(withPos, currentUser?.role);
+    });
 
     res.json({
       success: true,
@@ -770,7 +838,7 @@ async function startServer() {
         success: false,
         code: "DUPLICATE_URL",
         message: `Эта ссылка на занятие КТалк уже находится в работе или успешно проверена ранее (Преподаватель: ${existingTask.teacherName}, Дата: ${existingTask.date}).`,
-        existingTask
+        existingTask: sanitizeTaskForCuratorRole(existingTask, currentUser.role)
       });
     }
 
@@ -886,11 +954,7 @@ async function startServer() {
 
       console.log(`[Python Pipeline] Запуск анализа через Python: ${taskId} (${teacherName})`);
 
-      const venvCandidates = [
-        path.join(process.cwd(), ".venv", "bin", "python3"),
-        "/opt/venv/bin/python3"
-      ];
-      const pythonBin = venvCandidates.find(p => fs.existsSync(p)) || "python3";
+      const pythonBin = resolvePythonBin();
 
       const child = spawn(pythonBin, args, {
         cwd: process.cwd(),
@@ -1042,7 +1106,12 @@ async function startServer() {
                   errorMessage: failMsg,
                   applicableCount: null,
                   earnedPoints: null,
-                  maxPoints: null
+                  maxPoints: null,
+                  aiModel: t.aiModel ?? null,
+                  tokenUsage: t.tokenUsage ?? null,
+                  framesUploaded: typeof t.framesUploaded === "number" ? t.framesUploaded : null,
+                  framesPlanned: typeof t.framesPlanned === "number" ? t.framesPlanned : null,
+                  modelAttempts: Array.isArray(t.modelAttempts) ? t.modelAttempts : null
                 }
               );
               await createLectureTasksBackup();
@@ -1073,16 +1142,23 @@ async function startServer() {
                   errorMessage: null,
                   applicableCount: typeof t.applicableCount === "number" ? t.applicableCount : null,
                   earnedPoints: typeof t.earnedPoints === "number" ? t.earnedPoints : null,
-                  maxPoints: typeof t.maxPoints === "number" ? t.maxPoints : null
+                  maxPoints: typeof t.maxPoints === "number" ? t.maxPoints : null,
+                  aiModel: t.aiModel ?? t.talkMetadata?.aiModel ?? null,
+                  tokenUsage: t.tokenUsage ?? null,
+                  framesUploaded: typeof t.framesUploaded === "number" ? t.framesUploaded : null,
+                  framesPlanned: typeof t.framesPlanned === "number" ? t.framesPlanned : null,
+                  modelAttempts: Array.isArray(t.modelAttempts) ? t.modelAttempts : null
                 }
               );
               await createLectureTasksBackup();
+              const modelLabel = t.aiModel || t.talkMetadata?.aiModel || "—";
+              const tokensTotal = t.tokenUsage?.totalTokens ?? "—";
               await logAuditEvent(
                 "ai_analyzer",
                 "system",
                 "TASK_ANALYSIS_COMPLETED",
                 taskId,
-                `Анализ встречи преподавателя ${actualTeacher} честно завершен через GigaChat. Оценка: ${t.totalScore}% (критериев: ${t.applicableCount ?? "?"})`,
+                `Анализ встречи преподавателя ${actualTeacher} честно завершён. Модель: ${modelLabel}, токенов: ${tokensTotal}, оценка: ${t.totalScore}% (критериев: ${t.applicableCount ?? "?"})`,
                 "127.0.0.1"
               );
             }
@@ -1143,6 +1219,7 @@ async function startServer() {
 
   // Статус конкретной задачи из БД
   app.get("/api/tasks/:id", requireAuth, async (req, res) => {
+    const currentUser: CuratorRecord = (req as any).user;
     const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const task = await getLectureTaskById(String(rawId || ""));
     if (!task) {
@@ -1154,7 +1231,8 @@ async function startServer() {
       const idx = pending.findIndex(t => t.id === task.id);
       queuePosition = idx >= 0 ? idx + 1 : 1;
     }
-    res.json({ success: true, task: queuePosition ? { ...task, queuePosition } : task });
+    const payloadTask = queuePosition ? { ...task, queuePosition } : task;
+    res.json({ success: true, task: sanitizeTaskForCuratorRole(payloadTask, currentUser?.role) });
   });
 
   // Повторная постановка сбойной или поврежденной лекции в очередь FIFO
@@ -1199,7 +1277,7 @@ async function startServer() {
       success: true,
       message: `Лекция возвращена в очередь FIFO на повторную проверку (позиция #${queuePosition}).`,
       queuePosition,
-      task: { ...requeued, queuePosition }
+      task: sanitizeTaskForCuratorRole({ ...requeued, queuePosition }, currentUser.role)
     });
   });
 
@@ -1244,6 +1322,7 @@ async function startServer() {
       "Предмет": t.subject,
       "Группа": t.groupName,
       "Ссылка на КТалк": t.lectureUrl,
+      "Модель ИИ": t.aiModel || t.talkMetadata?.aiModel || "—",
       "Итоговый балл": t.totalScore,
       "Применимо критериев": t.applicableCount ?? t.criteria.filter((c: any) => !c?.notApplicable && c?.score !== null).length,
       "Критический статус": t.criticalViolations && t.criticalViolations.length > 0 ? "Критическое нарушение" : "Без критических нарушений",
@@ -1469,7 +1548,7 @@ async function startServer() {
       }
 
       try {
-        const child = execFile("python3", ["prompt_manager.py", "confirm_save", user.email, "DIRECT_VERIFIED", action || "save_active", ip], { encoding: "utf-8" }, () => {});
+        const child = execFile(resolvePythonBin(), ["prompt_manager.py", "confirm_save", user.email, "DIRECT_VERIFIED", action || "save_active", ip], { encoding: "utf-8" }, () => {});
         child.stdin?.write(finalPromptToSave);
         child.stdin?.end();
       } catch {}
@@ -1656,6 +1735,210 @@ async function startServer() {
     });
   });
 
+  // -------------------------------------------------------------
+  // 7. ЛИМИТЫ ТОКЕНОВ, РОТАЦИЯ И ЖИВОЙ СТАТУС GIGACHAT (SENIOR ONLY)
+  // -------------------------------------------------------------
+  const GIGACHAT_MODEL_CHAIN = [
+    "GigaChat-2-Pro",
+    "GigaChat-2-Max",
+    "GigaChat-3-Ultra",
+    "GigaChat-2"
+  ];
+
+  app.get("/api/ai/settings", requireAuth, requireSeniorCurator, async (req, res) => {
+    try {
+      const [settings, tasks] = await Promise.all([
+        getAISettingsFromDB(),
+        getLectureTasks()
+      ]);
+
+      const statsMap = new Map<
+        string,
+        {
+          model: string;
+          checksCount: number;
+          promptTokens: number;
+          completionTokens: number;
+          totalTokens: number;
+          lastUsedAt: string | null;
+        }
+      >();
+
+      for (const m of GIGACHAT_MODEL_CHAIN) {
+        statsMap.set(m, {
+          model: m,
+          checksCount: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          lastUsedAt: null
+        });
+      }
+
+      let totalChecksWithModel = 0;
+      let totalTrackedTokens = 0;
+      let totalTrackedPromptTokens = 0;
+      let totalTrackedCompletionTokens = 0;
+
+      for (const t of tasks) {
+        if (t.status !== "completed" && !t.aiModel && !t.tokenUsage) continue;
+        const m = t.aiModel || t.talkMetadata?.aiModel || null;
+        const pTok = Number(t.tokenUsage?.promptTokens || 0);
+        const cTok = Number(t.tokenUsage?.completionTokens || 0);
+        const totTok = Number(t.tokenUsage?.totalTokens || (pTok + cTok));
+
+        if (m) {
+          totalChecksWithModel++;
+          const entry = statsMap.get(m) || {
+            model: m,
+            checksCount: 0,
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            lastUsedAt: null
+          };
+          entry.checksCount += 1;
+          entry.promptTokens += pTok;
+          entry.completionTokens += cTok;
+          entry.totalTokens += totTok;
+          if (!entry.lastUsedAt || new Date(t.createdAt).getTime() > new Date(entry.lastUsedAt).getTime()) {
+            entry.lastUsedAt = t.createdAt;
+          }
+          statsMap.set(m, entry);
+        }
+
+        if (totTok > 0) {
+          totalTrackedPromptTokens += pTok;
+          totalTrackedCompletionTokens += cTok;
+          totalTrackedTokens += totTok;
+        }
+      }
+
+      res.json({
+        success: true,
+        settings,
+        modelChain: GIGACHAT_MODEL_CHAIN,
+        modelStats: Array.from(statsMap.values()),
+        summary: {
+          totalCompleted: tasks.filter(t => t.status === "completed" && !t.isCorrupted).length,
+          totalChecksWithModel,
+          totalTrackedPromptTokens,
+          totalTrackedCompletionTokens,
+          totalTrackedTokens
+        }
+      });
+    } catch (err: any) {
+      console.error("[AI Settings API] Ошибка чтения настроек ИИ:", err);
+      res.status(500).json({
+        success: false,
+        message: "Не удалось загрузить настройки и статистику ИИ.",
+        settings: { ...DEFAULT_AI_SETTINGS },
+        modelChain: GIGACHAT_MODEL_CHAIN,
+        modelStats: []
+      });
+    }
+  });
+
+  app.put("/api/ai/settings", requireAuth, requireSeniorCurator, async (req, res) => {
+    const ip = getClientIp(req);
+    const user: CuratorRecord = (req as any).user;
+    try {
+      const rawMax = Number(req.body?.maxRequestTokens);
+      if (!Number.isFinite(rawMax) || rawMax < 32000 || rawMax > 256000) {
+        return res.status(400).json({
+          success: false,
+          message: "Максимальное расчётное число токенов на запрос должно быть от 32 000 до 256 000."
+        });
+      }
+
+      const rawOut = req.body?.reservedOutputTokens !== undefined
+        ? Number(req.body.reservedOutputTokens)
+        : DEFAULT_AI_SETTINGS.reservedOutputTokens;
+      const safeOut = Number.isFinite(rawOut)
+        ? Math.max(2048, Math.min(8192, Math.round(rawOut)))
+        : DEFAULT_AI_SETTINGS.reservedOutputTokens;
+
+      const enableRotation = req.body?.enableModelRotation !== undefined
+        ? Boolean(req.body.enableModelRotation)
+        : true;
+
+      const saved = await saveAISettingsInDB(
+        {
+          maxRequestTokens: Math.round(rawMax),
+          reservedOutputTokens: safeOut,
+          enableModelRotation: enableRotation
+        },
+        user.email
+      );
+
+      await logAuditEvent(
+        user.email,
+        user.role,
+        "AI_SETTINGS_UPDATED",
+        "ai_settings",
+        `Обновлены настройки GigaChat: лимит запроса=${saved.maxRequestTokens} токенов, резерв ответа=${saved.reservedOutputTokens} токенов, ротация Pro→Max→Ultra→Base=${saved.enableModelRotation ? "вкл" : "выкл"}`,
+        ip
+      );
+
+      res.json({
+        success: true,
+        message: `Лимит на один запрос (${saved.maxRequestTokens.toLocaleString("ru-RU")} токенов) и параметры ротации сохранены.`,
+        settings: saved
+      });
+    } catch (err: any) {
+      console.error("[AI Settings API] Ошибка сохранения настроек ИИ:", err);
+      res.status(500).json({
+        success: false,
+        message: err?.message || "Ошибка сохранения настроек ИИ."
+      });
+    }
+  });
+
+  app.get("/api/ai/status", requireAuth, requireSeniorCurator, async (req, res) => {
+    try {
+      const pythonBin = resolvePythonBin();
+      execFile(
+        pythonBin,
+        ["ai_gigachat.py", "--status"],
+        { cwd: process.cwd(), env: { ...process.env }, timeout: 35000 },
+        (err, stdout, stderr) => {
+          if (stdout && stdout.trim()) {
+            const lines = stdout.trim().split(/\r?\n/);
+            for (let i = lines.length - 1; i >= 0; i--) {
+              const line = lines[i].trim();
+              if (line.startsWith("{") && line.endsWith("}")) {
+                try {
+                  const parsed = JSON.parse(line);
+                  return res.json(parsed);
+                } catch {}
+              }
+            }
+          }
+          return res.status(500).json({
+            success: false,
+            scope: process.env.GIGACHAT_SCOPE || "GIGACHAT_API_PERS",
+            availableModels: [],
+            balances: [],
+            balanceSupported: false,
+            balanceHttpStatus: null,
+            balanceNote: "Не удалось получить ответ диагностики от Python-клиента GigaChat.",
+            error: err?.message || stderr || "Unknown Python status error",
+            checkedAt: new Date().toISOString()
+          });
+        }
+      );
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        availableModels: [],
+        balances: [],
+        balanceSupported: false,
+        error: err?.message || "Ошибка запуска диагностики GigaChat",
+        checkedAt: new Date().toISOString()
+      });
+    }
+  });
+
   // Служебные эндпоинты (Схема БД, Config)
   app.get("/api/db-schema.jpg", (req, res) => {
     res.sendFile(path.join(process.cwd(), "db_schema.jpg"));
@@ -1675,7 +1958,7 @@ async function startServer() {
 
   if (isRussianWorkerEnabled) {
     console.log("[Russian Worker] Фоновый процессор запущен.");
-    workerProc = spawn("python3", ["worker_processor.py"], {
+    workerProc = spawn(resolvePythonBin(), ["worker_processor.py"], {
       stdio: ["ignore", "inherit", "inherit"],
     });
   }
@@ -1703,6 +1986,9 @@ async function startServer() {
     console.log(`🗄️ База данных: PostgreSQL 16 / SQLite Fallback`);
     console.log(`📧 Начальный старший куратор: shurygin.egor2009@gmail.com`);
     console.log(`=============================================================\n`);
+
+    // Проверяем и при необходимости восстанавливаем Python-зависимости в фоне
+    ensurePythonDependenciesOnce();
 
     // Запускаем обработку сохраненной в БД очереди FIFO при старте сервера
     void processLectureQueue();

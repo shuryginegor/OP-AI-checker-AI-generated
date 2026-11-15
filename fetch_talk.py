@@ -43,61 +43,134 @@ def get_base_url_from_url(recording_url: str) -> str:
     return base_api_url
 
 
+async def _verify_video_file_complete(file_path: str) -> bool:
+    """Быстро проверяет, что видеофайл существует, не пустой и имеет валидный контейнер MP4."""
+    if not file_path or not os.path.exists(file_path):
+        return False
+    if os.path.getsize(file_path) < 128 * 1024:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", file_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        dur_str = stdout.decode("utf-8", errors="ignore").strip()
+        return proc.returncode == 0 and bool(dur_str) and float(dur_str) > 1.0
+    except Exception:
+        return os.path.getsize(file_path) > 1024 * 1024
+
+
 async def download_talk_video(client: httpx.AsyncClient, base_url: str, recording_key: str, api_key: str,
                               output_path: str, quality: str = "900p", error_out: dict | None = None) -> bool:
-    """Скачивает видеозапись асинхронно и сохраняет её напрямую на диск."""
-    headers = {"X-Auth-Token": api_key, "Accept": "application/octet-stream"}
+    """
+    Скачивает видеозапись асинхронно с защитой от вечного зависания потока (read=60s),
+    поддержкой докачки Range и автоматическими повторами (до 4 попыток). Разрешение 900p сохраняется.
+    """
+    if await _verify_video_file_complete(output_path):
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        logger.info(f"Локальный видеофайл уже полностью загружен ({size_mb:.2f} MB), пропускаем повторную загрузку: {output_path}")
+        return True
+
+    part_path = f"{output_path}.part"
     endpoint = f"{base_url}/Recordings/{recording_key}/file/{quality}"
     params = {"qualityName": quality}
+    max_attempts = 4
+    last_error = "Неизвестная ошибка скачивания видео с КТалк."
+
     logger.info(f"Загрузка видеофайла ({quality}) в файл {output_path}...")
     logger.debug(f"Endpoint: {endpoint}, params={params}")
 
-    try:
-        total_downloaded = 0
-        async with client.stream("GET", endpoint, headers=headers, params=params) as response:
-            if response.status_code != 200:
-                error_bytes = await response.aread()
-                error_body = error_bytes.decode("utf-8", errors="ignore").strip()
-                msg = f"HTTP {response.status_code} при скачивании видеозаписи с КТалк"
-                if error_body:
-                    msg += f": {error_body[:240]}"
-                logger.warning(msg)
-                if error_out is not None:
-                    error_out["error"] = msg
-                return False
+    for attempt in range(1, max_attempts + 1):
+        existing_bytes = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+        headers = {"X-Auth-Token": api_key, "Accept": "application/octet-stream"}
+        if existing_bytes > 0:
+            headers["Range"] = f"bytes={existing_bytes}-"
+            logger.info(f"[KTalk] Попытка {attempt}/{max_attempts}: докачка с {existing_bytes / (1024 * 1024):.2f} MB...")
+        elif attempt > 1:
+            logger.info(f"[KTalk] Попытка скачивания {attempt}/{max_attempts}...")
 
-            with open(output_path, "wb") as f:
-                async for chunk in response.aiter_bytes(chunk_size=65536):
-                    if chunk:
-                        f.write(chunk)
-                        total_downloaded += len(chunk)
+        try:
+            async with client.stream("GET", endpoint, headers=headers, params=params) as response:
+                # Если сервер отказал в Range (416), сбрасываем .part и начинаем сначала
+                if response.status_code == 416:
+                    logger.warning("[KTalk] Сервер отклонил Range (416). Сбрасываем временный файл и качаем сначала.")
+                    if os.path.exists(part_path):
+                        os.remove(part_path)
+                    continue
 
-            if total_downloaded <= 0:
-                msg = "Сервер КТалк вернул пустой видеофайл (0 байт)."
-                logger.warning(msg)
-                if os.path.exists(output_path):
-                    try:
-                        os.remove(output_path)
-                    except Exception:
-                        pass
-                if error_out is not None:
-                    error_out["error"] = msg
-                return False
+                if response.status_code not in (200, 206):
+                    error_bytes = await response.aread()
+                    error_body = error_bytes.decode("utf-8", errors="ignore").strip()
+                    last_error = f"HTTP {response.status_code} при скачивании видеозаписи с КТалк"
+                    if error_body:
+                        last_error += f": {error_body[:240]}"
+                    logger.warning(f"[KTalk] {last_error} (попытка {attempt}/{max_attempts})")
+                    # При авторизации/404 не ждём лишнего, но при 5xx/429 повторяем
+                    if response.status_code in (401, 403, 404):
+                        break
+                    await asyncio.sleep(min(12, attempt * 3))
+                    continue
 
-            size_mb = total_downloaded / (1024 * 1024)
-            logger.info(f"Видео успешно сохранено на диск: {output_path} (Размер: {size_mb:.2f} MB)")
-            return True
-    except Exception as e:
-        msg = f"Ошибка сети или ввода-вывода при скачивании видео: {e}"
-        logger.error(msg, exc_info=True)
-        if os.path.exists(output_path):
+                is_resumed = (response.status_code == 206 and existing_bytes > 0)
+                if not is_resumed and existing_bytes > 0:
+                    existing_bytes = 0
+
+                content_len_hdr = response.headers.get("Content-Length")
+                expected_chunk_bytes = int(content_len_hdr) if (content_len_hdr and content_len_hdr.isdigit()) else None
+
+                mode = "ab" if is_resumed else "wb"
+                received_this_try = 0
+                with open(part_path, mode) as f:
+                    async for chunk in response.aiter_bytes(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                            received_this_try += len(chunk)
+
+                total_size = existing_bytes + received_this_try
+                if total_size <= 0:
+                    last_error = "Сервер КТалк вернул пустой видеофайл (0 байт)."
+                    logger.warning(f"[KTalk] {last_error} (попытка {attempt}/{max_attempts})")
+                    if os.path.exists(part_path):
+                        os.remove(part_path)
+                    await asyncio.sleep(min(12, attempt * 3))
+                    continue
+
+                if expected_chunk_bytes is not None and received_this_try < expected_chunk_bytes:
+                    last_error = (
+                        f"Поток КТалк оборвался до завершения ({received_this_try} из {expected_chunk_bytes} байт)."
+                    )
+                    logger.warning(f"[KTalk] {last_error} (попытка {attempt}/{max_attempts})")
+                    await asyncio.sleep(min(12, attempt * 3))
+                    continue
+
+                os.replace(part_path, output_path)
+                size_mb = total_size / (1024 * 1024)
+                logger.info(f"Видео успешно сохранено на диск: {output_path} (Размер: {size_mb:.2f} MB, попытка {attempt})")
+                return True
+
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError, httpx.ReadError, httpx.TransportError) as net_err:
+            partial_mb = (os.path.getsize(part_path) / (1024 * 1024)) if os.path.exists(part_path) else 0.0
+            last_error = f"Таймаут или разрыв соединения КТалк ({type(net_err).__name__}: {net_err})"
+            logger.warning(f"[KTalk] {last_error} при скачанных {partial_mb:.2f} MB (попытка {attempt}/{max_attempts})")
+            if attempt < max_attempts:
+                await asyncio.sleep(min(12, attempt * 3))
+        except Exception as e:
+            last_error = f"Ошибка сети или ввода-вывода при скачивании видео: {e}"
+            logger.error(f"[KTalk] {last_error} (попытка {attempt}/{max_attempts})", exc_info=True)
+            if attempt < max_attempts:
+                await asyncio.sleep(min(12, attempt * 3))
+
+    for p in (part_path, output_path):
+        if os.path.exists(p):
             try:
-                os.remove(output_path)
+                os.remove(p)
             except Exception:
                 pass
-        if error_out is not None:
-            error_out["error"] = msg
-        return False
+    if error_out is not None:
+        error_out["error"] = f"{last_error} (после {max_attempts} попыток)"
+    return False
 
 
 async def get_text_artifacts(client: httpx.AsyncClient, base_url: str, recording_key: str, api_key: str) -> dict | None:
@@ -219,8 +292,9 @@ async def download_all_artifacts_by_url(record_url: str, api_key: str, task_pref
 
         video_output_path = os.path.join(artifacts_dir, f"{base_name}_video.mp4")
 
-        # Настройки таймаутов, убирающие ошибку ReadTimeout при скачивании тяжелых видео чанками
-        timeout_settings = httpx.Timeout(connect=15.0, read=None, write=20.0, pool=15.0)
+        # Таймауты потокового скачивания: read=60.0 защищает от «вечного» зависания сокета КТалк,
+        # а download_talk_video автоматически докачает оборвавшийся файл через Range (до 4 попыток)
+        timeout_settings = httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=15.0)
 
         video_res = None
         artifacts_res = None

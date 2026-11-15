@@ -254,7 +254,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               <Shield className="w-3 h-3 text-amber-400" />
               Только для старших кураторов
             </span>
-            <span className="text-xs text-indigo-200/80">Калибровка нейросети GigaChat-2-Pro</span>
+            <span className="text-xs text-indigo-200/80">Калибровка нейросети GigaChat (Pro / Max / Ultra)</span>
           </div>
           <h2 className="text-xl font-black text-white">
             Редактор системного промпта и критериев оценки
@@ -395,7 +395,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
         {activeSubTab === 'editor' && (
           <div className="space-y-3">
             <div className="flex items-center justify-between text-xs text-indigo-300">
-              <span>Системная инструкция, отправляемая в Сбер GigaChat-2-Pro перед анализом:</span>
+              <span>Системная инструкция, отправляемая в Сбер GigaChat (Pro / Max / Ultra) перед анализом:</span>
               <button
                 onClick={() => handleCopy(activePromptText, 'active')}
                 className="hover:text-white flex items-center gap-1 font-mono cursor-pointer"
