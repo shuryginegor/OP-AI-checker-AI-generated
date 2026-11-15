@@ -2821,23 +2821,38 @@ export default function App() {
                           </div>
                         )}
 
-                        {/* Таймкоды нарушений */}
-                        {c.timecodes && c.timecodes.length > 0 && (
-                          <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                            <span className="text-[10px] text-amber-300 font-semibold flex items-center gap-1">
-                              <Clock className="w-3.5 h-3.5 text-amber-400" />
-                              Таймкоды нарушений:
-                            </span>
-                            {c.timecodes.map((tc: string, tcIdx: number) => (
+                        {/* Таймкоды нарушений (только при снятии баллов) или подтверждений */}
+                        {c.timecodes && c.timecodes.length > 0 && (() => {
+                          const hasViolation = !isNA && (!c.passed || penaltyVal > 0);
+                          return (
+                            <div className="flex flex-wrap items-center gap-1.5 pt-1">
                               <span
-                                key={tcIdx}
-                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                                className={`text-[10px] font-semibold flex items-center gap-1 ${
+                                  hasViolation ? 'text-amber-300' : 'text-sky-300'
+                                }`}
                               >
-                                🕒 {tc}
+                                <Clock
+                                  className={`w-3.5 h-3.5 ${
+                                    hasViolation ? 'text-amber-400' : 'text-sky-400'
+                                  }`}
+                                />
+                                {hasViolation ? 'Таймкоды нарушений:' : 'Таймкоды подтверждения (без штрафа):'}
                               </span>
-                            ))}
-                          </div>
-                        )}
+                              {c.timecodes.map((tc: string, tcIdx: number) => (
+                                <span
+                                  key={tcIdx}
+                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono font-bold border ${
+                                    hasViolation
+                                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                                      : 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                                  }`}
+                                >
+                                  🕒 {tc}
+                                </span>
+                              ))}
+                            </div>
+                          );
+                        })()}
 
                         {/* Цитата из речи */}
                         {c.quote && (
