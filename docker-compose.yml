@@ -51,23 +51,28 @@ services:
       - TOKEN_SECRET=${TOKEN_SECRET:-olymp-secret-key-2026-checker-secret-secure-salt-2026}
       - ADMIN_USERNAMES=${ADMIN_USERNAMES:-shurygin_egor,aemss72}
       - PROMPT_ADMIN_USERNAMES=${PROMPT_ADMIN_USERNAMES:-shurygin_egor,aemss72}
-      - TALK_API_KEY=${TALK_API_KEY}
-      - TALK_DOMAIN=${TALK_DOMAIN}
-      - GIGACHAT_CREDENTIALS=${GIGACHAT_CREDENTIALS}
+      - APP_URL=${APP_URL:-http://localhost:3000}
+      - TALK_API_KEY=${TALK_API_KEY:-}
+      - TALK_DOMAIN=${TALK_DOMAIN:-}
+      - GIGACHAT_CREDENTIALS=${GIGACHAT_CREDENTIALS:-}
+      - GIGACHAT_CLIENT_ID=${GIGACHAT_CLIENT_ID:-}
+      - GIGACHAT_CLIENT_SECRET=${GIGACHAT_CLIENT_SECRET:-}
       - GIGACHAT_SCOPE=${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
       - GIGACHAT_MODEL=${GIGACHAT_MODEL:-GigaChat-2-Pro}
-      - SMTP_HOST=${SMTP_HOST}
+      - GIGACHAT_VERIFY_SSL_CERTS=${GIGACHAT_VERIFY_SSL_CERTS:-true}
+      - SMTP_HOST=${SMTP_HOST:-}
       - SMTP_PORT=${SMTP_PORT:-465}
       - SMTP_SECURE=${SMTP_SECURE:-true}
-      - SMTP_USER=${SMTP_USER}
-      - SMTP_PASS=${SMTP_PASS}
-      - SMTP_FROM=${SMTP_FROM}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - TESTING_MODE=${TESTING_MODE:-false}
     volumes:
-      # Постоянное хранилище текстов промптов, кураторов и задач
+      # Постоянное хранилище БД, настроек ИИ, промптов и кураторов
       - ./data:/app/data
-      # Временная папка для нарезки видео (очищается воркером)
+      # Временная папка загрузки/нарезки (сохраняет .part при рестарте и очищается после анализа)
+      - ./artifacts:/app/artifacts
       - ./temp_lectures:/app/temp_lectures
     logging:
       driver: "json-file"

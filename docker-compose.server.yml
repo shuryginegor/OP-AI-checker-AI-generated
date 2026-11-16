@@ -3,8 +3,6 @@
 # Полное соблюдение 152-ФЗ: ПДн, скачивание лекций, ffmpeg и GigaChat — в РФ!
 # ==============================================================================
 
-version: '3.8'
-
 services:
   # 1. Сервис реляционной базы данных PostgreSQL 16
   postgres:
@@ -38,6 +36,9 @@ services:
         condition: service_healthy
     ports:
       - "${PORT:-3000}:3000"
+    env_file:
+      - path: .env
+        required: false
     environment:
       - NODE_ENV=production
       - PORT=3000
@@ -59,8 +60,9 @@ services:
       - GIGACHAT_CREDENTIALS=${GIGACHAT_CREDENTIALS}
       - GIGACHAT_CLIENT_ID=${GIGACHAT_CLIENT_ID}
       - GIGACHAT_CLIENT_SECRET=${GIGACHAT_CLIENT_SECRET}
-      - GIGACHAT_SCOPE=${GIGACHAT_SCOPE:-GIGACHAT_API_CORP}
+      - GIGACHAT_SCOPE=${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
       - GIGACHAT_MODEL=${GIGACHAT_MODEL:-GigaChat-2-Pro}
+      - GIGACHAT_VERIFY_SSL_CERTS=${GIGACHAT_VERIFY_SSL_CERTS:-true}
       
       # Подключение к локальной базе PostgreSQL
       - DB_TYPE=postgres
@@ -87,9 +89,10 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - TESTING_MODE=${TESTING_MODE:-false}
     volumes:
-      # Постоянное хранилище промптов
+      # Постоянное хранилище промптов и настроек
       - ./data:/app/data
-      # Временная папка для нарезки видео (сразу удаляется после анализа)
+      # Временная папка загрузки/нарезки (сразу удаляется после анализа)
+      - ./artifacts:/app/artifacts
       - ./temp_lectures:/app/temp_lectures
     logging:
       driver: "json-file"

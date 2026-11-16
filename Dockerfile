@@ -13,9 +13,9 @@ COPY package.json package-lock.json* bun.lock* ./
 RUN npm install
 
 # Copy source code and config files
-COPY tsconfig.json vite.config.ts index.html *.ts ./
+COPY tsconfig.json tsconfig.server.json vite.config.ts index.html *.ts ./
 COPY src ./src
-COPY public ./public*
+COPY public ./public
 
 # Build Vite static assets and bundle server.ts into dist/server.cjs
 RUN npm run build
@@ -30,7 +30,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TZ=UTC
 
 # Install system dependencies:
-# - python3, python3-pip, python3-venv: Required for Telegram bot and AI logic
+# - python3, python3-pip, python3-venv: Required for AI pipeline and bot modules
 # - ffmpeg: Required for video/audio processing and frame extraction
 # - procps: Required for pkill/ps process supervisor in server.ts
 # - ca-certificates: Required for secure HTTPS requests (KTalk, GigaChat, etc.)
@@ -66,17 +66,18 @@ COPY --from=builder /app/dist ./dist
 
 # Copy Python modules, configuration, and static assets
 COPY *.py ./
-COPY *.ts ./
-COPY db_schema.jpg ./
-COPY COMPLIANCE_152FZ.md ./
+COPY metadata.json db_schema.jpg COMPLIANCE_152FZ.md ./
 COPY certs ./certs
 
 # Install trusted Russian CA certificates for GigaChat / KTalk TLS
-RUN cp certs/russian_trusted_root_ca.pem /usr/local/share/ca-certificates/russian_trusted_root_ca.crt && \
-    update-ca-certificates
+RUN if [ -f certs/russian_trusted_root_ca.pem ]; then \
+        cp certs/russian_trusted_root_ca.pem /usr/local/share/ca-certificates/russian_trusted_root_ca.crt && \
+        update-ca-certificates; \
+    fi
 
-# Prepare directory for persistent prompts and files storage
-RUN mkdir -p /app/data && chmod 777 /app/data
+# Prepare directories for persistent data, media artifacts, and temp processing
+RUN mkdir -p /app/data /app/artifacts /app/temp_lectures && \
+    chmod -R 777 /app/data /app/artifacts /app/temp_lectures
 
 # Default environment configuration (Production with PostgreSQL 16)
 ENV NODE_ENV=production \
