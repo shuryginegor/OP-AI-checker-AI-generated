@@ -1235,7 +1235,7 @@ async function startServer() {
     res.json({ success: true, task: sanitizeTaskForCuratorRole(payloadTask, currentUser?.role) });
   });
 
-  // Повторная постановка сбойной или поврежденной лекции в очередь FIFO
+  // Повторная постановка лекции (включая уже проверенную, сбойную или поврежденную) в очередь FIFO
   app.post("/api/tasks/:id/retry", requireAuth, async (req, res) => {
     const ip = getClientIp(req);
     const currentUser: CuratorRecord = (req as any).user;
@@ -1246,10 +1246,11 @@ async function startServer() {
       return res.status(404).json({ success: false, message: "Задача проверки не найдена." });
     }
 
-    if (task.status !== "failed" && !task.isCorrupted) {
+    const activeStatuses = new Set(["pending", "downloading", "extracting", "uploading", "analyzing"]);
+    if (activeStatuses.has(task.status)) {
       return res.status(400).json({
         success: false,
-        message: "Повторная проверка доступна только для сбойных или повреждённых задач."
+        message: "Эта лекция уже находится в очереди или проверяется прямо сейчас."
       });
     }
 

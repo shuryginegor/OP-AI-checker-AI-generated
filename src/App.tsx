@@ -522,7 +522,7 @@ export default function App() {
     }
   };
 
-  // Повторный запуск сбойной или поврежденной лекции в очередь FIFO
+  // Повторный запуск любой завершённой, сбойной или повреждённой лекции в очередь FIFO
   const handleRetryTask = async (e: React.MouseEvent, taskId: string) => {
     e.stopPropagation();
     if (!authToken || retryingTaskId) return;
@@ -538,6 +538,15 @@ export default function App() {
         setDashboardNotice(data.message || 'Лекция возвращена в очередь FIFO на повторную проверку.');
         if (rawJsonModalTask?.id === taskId) {
           setRawJsonModalTask(null);
+        }
+        if (activeDetailTask?.id === taskId) {
+          setActiveDetailTask(null);
+        }
+        if (duplicateErrorTask?.id === taskId) {
+          setDuplicateErrorTask(null);
+          setSubmitError('');
+          setIsCheckModalOpen(false);
+          setActiveTab('dashboard');
         }
         await fetchTasksAndTeachers();
         setTimeout(() => setDashboardNotice(''), 5000);
@@ -1427,7 +1436,8 @@ export default function App() {
                     {filteredTasks.map((t) => {
                       const hasCritical = Array.isArray(t.criticalViolations) && t.criticalViolations.length > 0;
                       const isCompletedValid = t.status === 'completed' && !t.isCorrupted && typeof t.totalScore === 'number';
-                      const canRetry = t.status === 'failed' || Boolean(t.isCorrupted);
+                      const isInProgress = ['pending', 'downloading', 'extracting', 'uploading', 'analyzing'].includes(t.status);
+                      const canRetry = !isInProgress;
 
                       return (
                       <tr
@@ -1601,14 +1611,55 @@ export default function App() {
                             </div>
                           )}
                         </td>
-                        <td className="px-6 py-4 text-right">
-                          {canRetry ? (
+                        <td className="px-6 py-4 text-right whitespace-nowrap">
+                          {t.status === 'pending' ? (
+                            <button
+                              disabled
+                              className="px-2.5 py-1.5 bg-indigo-950/50 border border-indigo-700/40 text-indigo-300/80 rounded-xl text-xs font-medium cursor-not-allowed ml-auto flex items-center gap-1.5"
+                              title="Лекция ожидает своей очереди на анализ в GigaChat"
+                            >
+                              <Clock className="w-3 h-3 text-cyan-400" />
+                              <span>Ожидает {t.queuePosition ? `#${t.queuePosition}` : '...'}</span>
+                            </button>
+                          ) : isInProgress ? (
+                            <button
+                              disabled
+                              className="px-2.5 py-1.5 bg-indigo-950/30 border border-indigo-800/20 text-indigo-400/40 rounded-xl text-xs font-medium cursor-not-allowed ml-auto flex items-center gap-1.5"
+                              title="Проверка лекции еще выполняется"
+                            >
+                              <span>В процессе...</span>
+                            </button>
+                          ) : isCompletedValid ? (
+                            <div className="flex items-center justify-end gap-2.5">
+                              <button
+                                type="button"
+                                onClick={(e) => handleRetryTask(e, t.id)}
+                                disabled={retryingTaskId === t.id}
+                                className="px-2.5 py-1.5 bg-[#14102C] hover:bg-[#241E4F] border border-indigo-700/60 text-indigo-200 hover:text-white disabled:opacity-50 rounded-xl text-xs font-semibold transition-all inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                                title="Отправить эту лекцию на повторную проверку в очередь FIFO"
+                              >
+                                <RotateCcw className={`w-3.5 h-3.5 text-[#38BDF8] ${retryingTaskId === t.id ? 'animate-spin' : ''}`} />
+                                <span>{retryingTaskId === t.id ? 'Запуск...' : 'Перепроверить'}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveDetailTask(t);
+                                }}
+                                className="text-[#FF5252] group-hover:text-white font-semibold text-xs flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+                              >
+                                <span>Подробнее</span>
+                                <ChevronRight className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ) : canRetry ? (
                             <div className="flex items-center justify-end gap-2">
                               <button
                                 type="button"
                                 onClick={(e) => handleRetryTask(e, t.id)}
                                 disabled={retryingTaskId === t.id}
-                                className="px-3 py-1.5 bg-[#FF5252] hover:bg-[#ff3b3b] disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer"
+                                className="px-3 py-1.5 bg-[#FF5252] hover:bg-[#ff3b3b] disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
                                 title="Повторно поставить лекцию в очередь проверки GigaChat"
                               >
                                 <RotateCcw className={`w-3.5 h-3.5 ${retryingTaskId === t.id ? 'animate-spin' : ''}`} />
@@ -1621,42 +1672,14 @@ export default function App() {
                                     e.stopPropagation();
                                     setRawJsonModalTask(t);
                                   }}
-                                  className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 hover:text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1 cursor-pointer"
+                                  className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 hover:text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1 cursor-pointer shrink-0"
                                   title="Открыть сырой ответ / ошибку"
                                 >
                                   <FileText className="w-3.5 h-3.5 text-amber-400" />
                                 </button>
                               )}
                             </div>
-                          ) : t.status === 'pending' ? (
-                            <button
-                              disabled
-                              className="px-2.5 py-1.5 bg-indigo-950/50 border border-indigo-700/40 text-indigo-300/80 rounded-xl text-xs font-medium cursor-not-allowed ml-auto flex items-center gap-1.5"
-                              title="Лекция ожидает своей очереди на анализ в GigaChat"
-                            >
-                              <Clock className="w-3 h-3 text-cyan-400" />
-                              <span>Ожидает {t.queuePosition ? `#${t.queuePosition}` : '...'}</span>
-                            </button>
-                          ) : t.status !== 'completed' ? (
-                            <button
-                              disabled
-                              className="px-2.5 py-1.5 bg-indigo-950/30 border border-indigo-800/20 text-indigo-400/40 rounded-xl text-xs font-medium cursor-not-allowed ml-auto flex items-center gap-1.5"
-                              title="Проверка лекции еще выполняется"
-                            >
-                              <span>В процессе...</span>
-                            </button>
-                          ) : (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setActiveDetailTask(t);
-                              }}
-                              className="text-[#FF5252] group-hover:text-white font-semibold text-xs flex items-center gap-1 ml-auto cursor-pointer"
-                            >
-                              <span>Подробнее</span>
-                              <ChevronRight className="w-3.5 h-3.5" />
-                            </button>
-                          )}
+                          ) : null}
                         </td>
                       </tr>
                       );
@@ -3024,10 +3047,24 @@ export default function App() {
             </div>
 
             {/* Подвал модалки */}
-            <div className="p-4 border-t border-indigo-900/60 bg-[#14102C]/60 flex justify-end">
+            <div className="p-4 border-t border-indigo-900/60 bg-[#14102C]/60 flex flex-wrap items-center justify-between gap-3">
+              {!['pending', 'downloading', 'extracting', 'uploading', 'analyzing'].includes(activeDetailTask.status) ? (
+                <button
+                  type="button"
+                  onClick={(e) => handleRetryTask(e, activeDetailTask.id)}
+                  disabled={retryingTaskId === activeDetailTask.id}
+                  className="px-4 py-2 bg-[#1B153B] hover:bg-[#241E4F] border border-indigo-700/70 text-indigo-100 hover:text-white disabled:opacity-50 rounded-xl text-xs font-bold transition-all inline-flex items-center gap-2 cursor-pointer whitespace-nowrap"
+                >
+                  <RotateCcw className={`w-3.5 h-3.5 text-[#38BDF8] ${retryingTaskId === activeDetailTask.id ? 'animate-spin' : ''}`} />
+                  <span>{retryingTaskId === activeDetailTask.id ? 'Постановка в очередь...' : 'Отправить на перепроверку'}</span>
+                </button>
+              ) : (
+                <div />
+              )}
               <button
+                type="button"
                 onClick={() => setActiveDetailTask(null)}
-                className="px-5 py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-[#FF5252]/30"
+                className="px-5 py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-[#FF5252]/30 cursor-pointer"
               >
                 Закрыть отчет
               </button>
@@ -3292,18 +3329,31 @@ export default function App() {
                         </div>
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsCheckModalOpen(false);
-                          setActiveTab('dashboard');
-                          setActiveDetailTask(duplicateErrorTask);
-                        }}
-                        className="mt-1 w-full py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer"
-                      >
-                        <Search className="w-3.5 h-3.5" />
-                        <span>Открыть существующий результат проверки</span>
-                      </button>
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsCheckModalOpen(false);
+                            setActiveTab('dashboard');
+                            setActiveDetailTask(duplicateErrorTask);
+                          }}
+                          className="flex-1 py-2 px-3 bg-[#1B153B] hover:bg-[#241E4F] border border-indigo-700/60 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                        >
+                          <Search className="w-3.5 h-3.5 text-[#38BDF8]" />
+                          <span>Открыть существующий отчёт</span>
+                        </button>
+                        {!['pending', 'downloading', 'extracting', 'uploading', 'analyzing'].includes(duplicateErrorTask.status) && (
+                          <button
+                            type="button"
+                            onClick={(e) => handleRetryTask(e, duplicateErrorTask.id)}
+                            disabled={retryingTaskId === duplicateErrorTask.id}
+                            className="flex-1 py-2 px-3 bg-[#FF5252] hover:bg-[#ff3b3b] disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                          >
+                            <RotateCcw className={`w-3.5 h-3.5 ${retryingTaskId === duplicateErrorTask.id ? 'animate-spin' : ''}`} />
+                            <span>{retryingTaskId === duplicateErrorTask.id ? 'Запуск...' : 'Отправить на перепроверку'}</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
