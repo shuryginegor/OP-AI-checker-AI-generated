@@ -48,7 +48,8 @@ logger = logging.getLogger(__name__)
 
 def get_dynamic_criteria():
     """Загружает актуальный список динамических критериев из data/criteria_active.json со строгой сквозной нумерацией."""
-    criteria_file = os.path.join(os.getcwd(), "data", "criteria_active.json")
+    data_dir = os.path.abspath(os.getenv("APP_DATA_DIR")) if os.getenv("APP_DATA_DIR") else os.path.join(os.getcwd(), "data")
+    criteria_file = os.path.join(data_dir, "criteria_active.json")
     if os.path.exists(criteria_file):
         try:
             with open(criteria_file, "r", encoding="utf-8") as f:
@@ -125,8 +126,9 @@ def build_default_factory_prompt() -> str:
 
 def get_active_system_prompt() -> str:
     """Возвращает текущий активный рабочий промпт (из файла data/prompt_active.txt, system_prompt_active.txt или заводской)."""
+    data_dir = os.path.abspath(os.getenv("APP_DATA_DIR")) if os.getenv("APP_DATA_DIR") else os.path.join(os.getcwd(), "data")
     for fn in ["prompt_active.txt", "system_prompt_active.txt"]:
-        active_path = os.path.join(os.getcwd(), "data", fn)
+        active_path = os.path.join(data_dir, fn)
         if os.path.exists(active_path):
             try:
                 with open(active_path, "r", encoding="utf-8") as f:
@@ -140,8 +142,9 @@ def get_active_system_prompt() -> str:
 
 def get_base_system_prompt() -> str:
     """Возвращает базовый эталонный системный промпт (из файла data/prompt_base.txt, system_prompt_base.txt или заводской)."""
+    data_dir = os.path.abspath(os.getenv("APP_DATA_DIR")) if os.getenv("APP_DATA_DIR") else os.path.join(os.getcwd(), "data")
     for fn in ["prompt_base.txt", "system_prompt_base.txt"]:
-        base_path = os.path.join(os.getcwd(), "data", fn)
+        base_path = os.path.join(data_dir, fn)
         if os.path.exists(base_path):
             try:
                 with open(base_path, "r", encoding="utf-8") as f:

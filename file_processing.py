@@ -76,7 +76,7 @@ def extract_media_sync(video_path: str):
         logger.info(f"[Media] Извлечение аудиодорожки через ffmpeg в {audio_path}...")
         cmd_audio = [
             "ffmpeg", "-y", "-i", video_path,
-            "-vn", "-ar", "16000", "-ac", "1", "-b:a", "32k",
+            "-vn", "-ar", "16000", "-ac", "1", "-b:a", "24k",
             audio_path
         ]
         logger.debug(f"[Media] Выполнение команды: {' '.join(cmd_audio)}")
@@ -87,7 +87,7 @@ def extract_media_sync(video_path: str):
                 clip = VideoFileClip(video_path)
                 try:
                     if clip.audio is not None:
-                        clip.audio.write_audiofile(audio_path, bitrate="32k", fps=16000, nbytes=2, logger=None)
+                        clip.audio.write_audiofile(audio_path, bitrate="24k", fps=16000, nbytes=2, logger=None)
                 finally:
                     clip.close()
     else:
@@ -143,6 +143,16 @@ def extract_media_sync(video_path: str):
             if res_img.returncode != 0:
                 logger.warning(f"Ошибка нарезки кадров ffmpeg: {res_img.stderr.decode('utf-8', errors='ignore')}")
             found_files = sorted(f for f in glob.glob(frame_glob) if os.path.exists(f) and os.path.getsize(f) > 1024)
+
+        if len(found_files) == 0:
+            single_frame_path = os.path.join(output_dir, f"{video_id}_frame_min_001.jpg")
+            cmd_single = [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vframes", "1", "-q:v", "3", single_frame_path
+            ]
+            res_single = subprocess.run(cmd_single, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res_single.returncode == 0 and os.path.exists(single_frame_path) and os.path.getsize(single_frame_path) > 1024:
+                found_files = [single_frame_path]
 
     image_paths = []
     for idx, img_p in enumerate(found_files):

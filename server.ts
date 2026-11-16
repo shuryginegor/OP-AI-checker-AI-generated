@@ -110,7 +110,7 @@ async function startServer() {
     }, 60 * 60 * 1000);
 
     // Гарантируем наличие criteria_active.json и prompt_active.txt на диске для Python-пайплайна
-    const dataDir = path.join(process.cwd(), "data");
+    const dataDir = process.env.APP_DATA_DIR ? path.resolve(process.env.APP_DATA_DIR) : path.join(process.cwd(), "data");
     if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
     const criteriaFile = path.join(dataDir, "criteria_active.json");
@@ -1421,9 +1421,10 @@ async function startServer() {
       let activePrompt = await getPromptConfigFromDB("active");
       let basePrompt = await getPromptConfigFromDB("base");
 
+      const dataDir = process.env.APP_DATA_DIR ? path.resolve(process.env.APP_DATA_DIR) : path.join(process.cwd(), "data");
       if (!activePrompt) {
-        const activePath = path.join(process.cwd(), "data", "prompt_active.txt");
-        const sysActivePath = path.join(process.cwd(), "data", "system_prompt_active.txt");
+        const activePath = path.join(dataDir, "prompt_active.txt");
+        const sysActivePath = path.join(dataDir, "system_prompt_active.txt");
         if (fs.existsSync(activePath)) {
           activePrompt = fs.readFileSync(activePath, "utf-8").trim();
         } else if (fs.existsSync(sysActivePath)) {
@@ -1432,8 +1433,8 @@ async function startServer() {
       }
 
       if (!basePrompt) {
-        const basePath = path.join(process.cwd(), "data", "prompt_base.txt");
-        const sysBasePath = path.join(process.cwd(), "data", "system_prompt_base.txt");
+        const basePath = path.join(dataDir, "prompt_base.txt");
+        const sysBasePath = path.join(dataDir, "system_prompt_base.txt");
         if (fs.existsSync(basePath)) {
           basePrompt = fs.readFileSync(basePath, "utf-8").trim();
         } else if (fs.existsSync(sysBasePath)) {
@@ -1523,7 +1524,7 @@ async function startServer() {
     }
 
     let finalPromptToSave: string | undefined = typeof prompt_text === "string" && prompt_text.trim() ? prompt_text : undefined;
-    const dataDir = path.join(process.cwd(), "data");
+    const dataDir = process.env.APP_DATA_DIR ? path.resolve(process.env.APP_DATA_DIR) : path.join(process.cwd(), "data");
     if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
     if (action === "reset_to_base") {
@@ -1712,7 +1713,7 @@ async function startServer() {
     await saveCriteriaConfigInDB("active", criteriaData, user.email);
 
     try {
-      const dataDir = path.join(process.cwd(), "data");
+      const dataDir = process.env.APP_DATA_DIR ? path.resolve(process.env.APP_DATA_DIR) : path.join(process.cwd(), "data");
       if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
       fs.writeFileSync(path.join(dataDir, "criteria_active.json"), JSON.stringify(criteriaData, null, 2), "utf-8");
     } catch (saveErr) {

@@ -35,7 +35,7 @@ import ai_gigachat
 import ai_common
 from gigachat.models import Chat, Messages, MessagesRole
 
-DATA_DIR = os.path.join(os.getcwd(), "data")
+DATA_DIR = os.path.abspath(os.getenv("APP_DATA_DIR")) if os.getenv("APP_DATA_DIR") else os.path.join(os.getcwd(), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 
@@ -419,7 +419,12 @@ async def execute_ktalk_gigachat_pipeline(
         talk_metadata["framesPlanned"] = frames_planned
 
         if audio_path and os.path.exists(audio_path) and not audio_file_id:
-            err_msg = "Не удалось загрузить аудиодорожку занятия в облако GigaChat. По правилам полной мультимодальной проверки анализ без аудиодорожки не выполняется."
+            audio_reason = getattr(ai_gigachat, "_last_audio_upload_error", None)
+            reason_suffix = f" Причина: {audio_reason[:240]}" if audio_reason else ""
+            err_msg = (
+                "Не удалось загрузить аудиодорожку занятия в облако GigaChat. "
+                f"По правилам полной мультимодальной проверки анализ без аудиодорожки не выполняется.{reason_suffix}"
+            )
             print(f"[Pipeline] {err_msg}", file=sys.stderr)
             return _build_failed_task(
                 task_id, lecture_url, teacher_name, subject, group_name, curator_email, talk_metadata, err_msg,

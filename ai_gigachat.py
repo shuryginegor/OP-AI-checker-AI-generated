@@ -41,7 +41,10 @@ DEFAULT_AI_SETTINGS: Dict[str, Any] = {
     "enableModelRotation": True,
 }
 
-AI_SETTINGS_PATH = os.path.join(os.getcwd(), "data", "ai_settings.json")
+AI_SETTINGS_PATH = os.path.join(
+    os.path.abspath(os.getenv("APP_DATA_DIR")) if os.getenv("APP_DATA_DIR") else os.path.join(os.getcwd(), "data"),
+    "ai_settings.json",
+)
 
 # URL-адреса сертификатов Минцифры по умолчанию
 DEFAULT_MINCIFRY_ROOT_URL = "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt"
@@ -143,7 +146,7 @@ def get_gigachat_client(model_override: Optional[str] = None) -> GigaChat:
         "scope": scope,
         "model": model,
         "verify_ssl_certs": verify_ssl,
-        "timeout": 300.0,
+        "timeout": 600.0,
     }
 
     if ca_bundle and os.path.exists(ca_bundle) and verify_ssl:
@@ -235,6 +238,45 @@ async def _upload_single_frame(
     return None
 
 
+_last_audio_upload_error: Optional[str] = None
+
+
+def _resolve_audio_upload_candidates(audio_path: str) -> List[str]:
+    """Возвращает приоритетный список MIME-типов для загрузки аудио в GigaChat /v1/files."""
+    ext = os.path.splitext(audio_path)[1].lower()
+    mapping = {
+        ".mp3": ["audio/mpeg", "audio/mp3"],
+        ".mp4": ["audio/mp4"],
+        ".m4a": ["audio/x-m4a", "audio/mp4"],
+        ".ogg": ["audio/ogg", "audio/x-ogg"],
+        ".opus": ["audio/opus", "audio/ogg"],
+        ".wav": ["audio/wav", "audio/x-wav"],
+        ".webm": ["audio/webm"],
+    }
+    return mapping.get(ext, ["audio/mpeg"])
+
+
+def _reencode_audio_bitrate_sync(audio_path: str, target_bitrate: str = "16k") -> Optional[str]:
+    """
+    Понижает битрейт аудио без обрезки длительности (вся лекция целиком),
+    если исходный файл приближается к лимиту 35 МБ GigaChat /v1/files.
+    """
+    import subprocess
+    if not os.path.exists(audio_path):
+        return None
+    base, _ = os.path.splitext(audio_path)
+    out_path = f"{base}_reenc_{target_bitrate}.mp3"
+    cmd = [
+        "ffmpeg", "-y", "-i", audio_path,
+        "-vn", "-ar", "16000", "-ac", "1", "-b:a", target_bitrate,
+        out_path
+    ]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if res.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) >= 4096:
+        return out_path
+    return None
+
+
 async def _upload_files_to_gigachat(
     client: GigaChat,
     audio_path: Optional[str],
@@ -242,32 +284,73 @@ async def _upload_files_to_gigachat(
     max_frames: int = 30
 ) -> Tuple[Optional[str], List[Tuple[str, str, str]], int]:
     """
-    Загружает полную аудиодорожку (с повторами и таймаутом 180 сек) и равномерно выбранные кадры
-    (через Semaphore(2) с повторами при 429) в хранилище GigaChat.
+    Загружает полную аудиодорожку (audio/mpeg по умолчанию + запасной MIME/битрейт при >32 МБ)
+    и равномерно выбранные кадры (через Semaphore(2) с повторами при 429) в хранилище GigaChat.
     Возвращает (audio_file_id, [(time_str, frame_file_id, img_path)], planned_frames_count).
     """
+    global _last_audio_upload_error
+    _last_audio_upload_error = None
     audio_file_id = None
-    if audio_path and os.path.exists(audio_path):
-        audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-        for attempt in range(1, 4):
-            try:
+    reencoded_temp_path: Optional[str] = None
+
+    try:
+        if audio_path and os.path.exists(audio_path):
+            upload_target_path = audio_path
+            audio_size_mb = os.path.getsize(upload_target_path) / (1024 * 1024)
+
+            # Лимит /v1/files в GigaChat — 35 МБ: если длинная лекция (3+ часа) больше 32 МБ,
+            # аккуратно снижаем битрейт до 16k, сохраняя 100% длительности аудиодорожки.
+            if audio_size_mb > 32.0:
                 logger.info(
-                    f"[GigaChat] Загрузка аудиодорожки {audio_path} ({audio_size_mb:.2f} MB), попытка {attempt}/3..."
+                    f"[GigaChat] Размер аудиодорожки {audio_size_mb:.2f} MB > 32 MB. "
+                    f"Сжимаем битрейт до 16k без обрезки длительности..."
                 )
-                t_audio_start = time.time()
-                with open(audio_path, "rb") as f:
-                    upload_res = await asyncio.wait_for(
-                        client.aupload_file((os.path.basename(audio_path), f, "audio/mp3"), purpose="general"),
-                        timeout=240.0
+                compressed = await asyncio.to_thread(_reencode_audio_bitrate_sync, upload_target_path, "16k")
+                if compressed:
+                    reencoded_temp_path = compressed
+                    upload_target_path = compressed
+                    audio_size_mb = os.path.getsize(upload_target_path) / (1024 * 1024)
+                    logger.info(f"[GigaChat] Перекодированная аудиодорожка: {audio_size_mb:.2f} MB")
+
+            mime_candidates = _resolve_audio_upload_candidates(upload_target_path)
+            mime_idx = 0
+
+            for attempt in range(1, 4):
+                current_mime = mime_candidates[min(mime_idx, len(mime_candidates) - 1)]
+                try:
+                    logger.info(
+                        f"[GigaChat] Загрузка аудиодорожки {upload_target_path} ({audio_size_mb:.2f} MB, {current_mime}), "
+                        f"попытка {attempt}/3..."
                     )
-                audio_file_id = upload_res.id_
-                elapsed = time.time() - t_audio_start
-                logger.info(f"[GigaChat] Аудиодорожка успешно загружена за {elapsed:.2f} сек. File ID: {audio_file_id}")
-                break
-            except Exception as audio_err:
-                logger.warning(f"[GigaChat] Ошибка загрузки аудиодорожки (попытка {attempt}/3): {audio_err}")
-                if attempt < 3:
-                    await asyncio.sleep(attempt * 4)
+                    t_audio_start = time.time()
+                    upload_timeout = min(600.0, max(360.0, audio_size_mb * 25.0))
+                    with open(upload_target_path, "rb") as f:
+                        upload_res = await asyncio.wait_for(
+                            client.aupload_file(
+                                (os.path.basename(upload_target_path), f, current_mime),
+                                purpose="general"
+                            ),
+                            timeout=upload_timeout
+                        )
+                    audio_file_id = upload_res.id_
+                    _last_audio_upload_error = None
+                    elapsed = time.time() - t_audio_start
+                    logger.info(f"[GigaChat] Аудиодорожка успешно загружена за {elapsed:.2f} сек. File ID: {audio_file_id}")
+                    break
+                except Exception as audio_err:
+                    err_text = str(audio_err) or type(audio_err).__name__
+                    _last_audio_upload_error = f"{type(audio_err).__name__}: {err_text}"
+                    logger.warning(f"[GigaChat] Ошибка загрузки аудиодорожки ({current_mime}, попытка {attempt}/3): {audio_err}")
+                    if "not supported" in err_text.lower() and mime_idx + 1 < len(mime_candidates):
+                        mime_idx += 1
+                    if attempt < 3:
+                        await asyncio.sleep(attempt * 4)
+    finally:
+        if reencoded_temp_path and os.path.exists(reencoded_temp_path):
+            try:
+                os.remove(reencoded_temp_path)
+            except Exception:
+                pass
 
     # Адаптивно сэмплируем кадры равномерно по длительности лекции на основе бюджета
     if max_frames <= 0 or not image_paths:
