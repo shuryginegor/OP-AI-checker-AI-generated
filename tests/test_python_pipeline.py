@@ -85,6 +85,8 @@ class TestPythonPipeline(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_model_rotation_order(self):
+        defaults = ai_gigachat.load_ai_settings()
+        self.assertEqual(defaults["maxRequestTokens"], 100_000)
         chain = ai_gigachat.get_model_rotation_order(True)
         self.assertEqual(chain, ["GigaChat-2-Pro", "GigaChat-2-Max", "GigaChat-3-Ultra", "GigaChat-2"])
         single = ai_gigachat.get_model_rotation_order(False)

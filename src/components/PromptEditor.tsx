@@ -225,7 +225,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
         </div>
         <h2 className="text-xl font-bold text-white">Доступ ограничен: ТОЛЬКО ДЛЯ СТАРШИХ КУРАТОРОВ</h2>
         <p className="text-sm text-indigo-200/80 leading-relaxed">
-          Редактирование системного промпта нейросети и калибровка 21 педагогического критерия доступны исключительно старшим методистам и руководителям.
+          Настройка правил проверки и критериев доступна только старшим кураторам и руководителям.
         </p>
         <div className="pt-2">
           <span className="text-xs text-amber-300 font-mono bg-amber-500/10 px-3 py-1.5 rounded-xl border border-amber-500/20">
@@ -254,13 +254,13 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               <Shield className="w-3 h-3 text-amber-400" />
               Только для старших кураторов
             </span>
-            <span className="text-xs text-indigo-200/80">Калибровка нейросети GigaChat (Pro / Max / Ultra)</span>
+            <span className="text-xs text-indigo-200/80">Настройка стандарта оценки занятий</span>
           </div>
           <h2 className="text-xl font-black text-white">
-            Редактор системного промпта и критериев оценки
+            Правила и инструкция проверки занятий
           </h2>
           <p className="text-xs text-indigo-200/70 max-w-2xl">
-            Изменения вступают в силу немедленно для всех последующих проверок видеозаписей КТалк. Каждое сохранение подтверждается 2FA-кодом на вашу почту.
+            Изменения применяются ко всем новым проверкам записей КТалк. Для сохранения нужен код подтверждения на почту.
           </p>
         </div>
 
@@ -289,6 +289,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => setActiveSubTab('editor')}
+              title="Текущая инструкция, по которой проверяются все новые лекции"
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
                 activeSubTab === 'editor'
                   ? 'bg-[#FF5252] text-white shadow-lg shadow-[#FF5252]/20'
@@ -296,10 +297,11 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               }`}
             >
               <FileCode className="w-3.5 h-3.5" />
-              Рабочий промпт
+              Рабочая инструкция
             </button>
             <button
               onClick={() => setActiveSubTab('report_format')}
+              title="Переключение отображения баллов в карточке (5-балльная, штрафная или статус) и настройка метки Н/П"
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
                 activeSubTab === 'report_format'
                   ? 'bg-[#38BDF8] text-[#14102C] shadow-lg shadow-[#38BDF8]/20'
@@ -311,6 +313,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
             </button>
             <button
               onClick={() => setActiveSubTab('base')}
+              title="Ваш сохранённый эталон (точка возврата) для быстрого отката"
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
                 activeSubTab === 'base'
                   ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20'
@@ -318,10 +321,11 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               }`}
             >
               <Shield className="w-3.5 h-3.5" />
-              Базовый эталон
+              Базовый вариант
             </button>
             <button
               onClick={() => setActiveSubTab('factory')}
+              title="Исходный шаблон правил по умолчанию (только просмотр)"
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
                 activeSubTab === 'factory'
                   ? 'bg-slate-700 text-white'
@@ -329,10 +333,11 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               }`}
             >
               <RotateCcw className="w-3.5 h-3.5" />
-              Заводской промпт
+              По умолчанию
             </button>
             <button
               onClick={() => setActiveSubTab('audit')}
+              title="Журнал всех сохранений и сбросов правил"
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
                 activeSubTab === 'audit'
                   ? 'bg-amber-500 text-[#14102C]'
@@ -349,30 +354,34 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               <>
                 <button
                   onClick={() => handleOpenActionModal('reset_to_base')}
+                  title="Заменить рабочую инструкцию на ваш сохранённый «Базовый вариант»"
                   className="px-3 py-2 bg-[#14102C] hover:bg-indigo-950 border border-indigo-700/60 text-indigo-200 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
-                  <span>Сбросить к базовому</span>
+                  <span>Сбросить к базовой</span>
                 </button>
                 <button
                   onClick={() => handleOpenActionModal('reset_to_factory')}
+                  title="Вернуть рабочую инструкцию к исходному шаблону «По умолчанию»"
                   className="px-3 py-2 bg-[#14102C] hover:bg-rose-950/50 border border-rose-500/30 text-rose-200 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
-                  <span>Заводской сброс</span>
+                  <span>Сброс по умолчанию</span>
                 </button>
                 <button
                   onClick={() => handleOpenActionModal('save_active')}
+                  title="Сохранить текст и применять его для всех новых проверок (нужен код на почту)"
                   className="px-4 py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 shadow-lg shadow-[#FF5252]/30 cursor-pointer"
                 >
                   <Save className="w-3.5 h-3.5" />
-                  <span>Сохранить рабочий промпт (2FA)</span>
+                  <span>Сохранить инструкцию (2FA)</span>
                 </button>
               </>
             )}
             {activeSubTab === 'report_format' && (
               <button
                 onClick={() => handleOpenActionModal('save_report_settings')}
+                title="Применить выбранный формат отображения баллов и подпись Н/П ко всем карточкам"
                 className="px-4 py-2 bg-[#FF5252] hover:bg-[#ff3b3b] text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 shadow-lg shadow-[#FF5252]/30 cursor-pointer"
               >
                 <Save className="w-3.5 h-3.5" />
@@ -382,12 +391,46 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
             {activeSubTab === 'base' && (
               <button
                 onClick={() => handleOpenActionModal('save_base')}
+                title="Зафиксировать этот текст как резервный «Базовый вариант» без изменения текущей рабочей инструкции"
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer"
               >
                 <Save className="w-3.5 h-3.5" />
-                <span>Зафиксировать новый эталон (2FA)</span>
+                <span>Сохранить как базовую (2FA)</span>
               </button>
             )}
+          </div>
+        </div>
+
+        {/* Подробная текстовая расшифровка кнопок и вкладок для старшего куратора */}
+        <div className="bg-[#14102C]/80 border border-indigo-900/60 rounded-2xl p-4 space-y-2.5">
+          <div className="text-xs font-bold text-white">
+            Что означает каждая вкладка и кнопка:
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-[11px] text-indigo-200/90 leading-relaxed">
+            <div>
+              <strong className="text-white">Рабочая инструкция</strong> — активный текст правил, по которому прямо сейчас проверяются все новые лекции.
+            </div>
+            <div>
+              <strong className="text-white">Сохранить инструкцию (2FA)</strong> — сохраняет отредактированный текст рабочей инструкции (требует код подтверждения на почту).
+            </div>
+            <div>
+              <strong className="text-white">Формат отчёта и Н/П</strong> — переключает отображение баллов в карточке (5-балльная, штрафы или статус) и текст метки для неприменимых пунктов без изменения итогового % урока.
+            </div>
+            <div>
+              <strong className="text-white">Сохранить формат отчёта (2FA)</strong> — применяет выбранный вид карточек и подпись Н/П ко всем отчётам (с подтверждением по коду).
+            </div>
+            <div>
+              <strong className="text-white">Базовый вариант / Сохранить как базовую (2FA)</strong> — ваша собственная резервная версия инструкции («точка отката»), на рабочие проверки не влияет до нажатия сброса.
+            </div>
+            <div>
+              <strong className="text-white">Сбросить к базовой</strong> — заменяет текущую рабочую инструкцию на ваш сохранённый «Базовый вариант» (с подтверждением по 2FA).
+            </div>
+            <div>
+              <strong className="text-white">По умолчанию / Сброс по умолчанию</strong> — исходный стандартный шаблон системы; кнопка сброса возвращает рабочую инструкцию к нему.
+            </div>
+            <div>
+              <strong className="text-white">История изменений</strong> — журнал того, кто и когда сохранял или сбрасывал правила и критерии проверки.
+            </div>
           </div>
         </div>
 
@@ -395,7 +438,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
         {activeSubTab === 'editor' && (
           <div className="space-y-3">
             <div className="flex items-center justify-between text-xs text-indigo-300">
-              <span>Системная инструкция, отправляемая в Сбер GigaChat (Pro / Max / Ultra) перед анализом:</span>
+              <span>Инструкция, по которой оценивается каждое занятие:</span>
               <button
                 onClick={() => handleCopy(activePromptText, 'active')}
                 className="hover:text-white flex items-center gap-1 font-mono cursor-pointer"
@@ -409,7 +452,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               onChange={(e) => setActivePromptText(e.target.value)}
               rows={22}
               className="w-full bg-[#120E27] border border-indigo-900/80 rounded-2xl p-4 text-xs font-mono text-slate-100 focus:outline-none focus:border-[#FF5252] transition-colors resize-y leading-relaxed"
-              placeholder="Загрузка текста системного промпта..."
+              placeholder="Загрузка инструкции проверки..."
             />
           </div>
         )}
@@ -435,7 +478,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
                   {
                     id: 'penalty' as const,
                     title: 'Штрафная шкала (-0 / -1 / -2)',
-                    desc: 'Показывает снятые штрафные баллы напрямую из оценки модели.'
+                    desc: 'Показывает снятые штрафные баллы (-0 / -1 / -2).'
                   },
                   {
                     id: 'status_only' as const,
@@ -514,11 +557,11 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
           </div>
         )}
 
-        {/* Заводской промпт */}
+        {/* По умолчанию */}
         {activeSubTab === 'factory' && (
           <div className="space-y-3">
             <div className="flex items-center justify-between text-xs text-indigo-300">
-              <span>Вшитый в исходный код заводской промпт разработчика:</span>
+              <span>Исходный шаблон инструкции проверки по умолчанию:</span>
               <button
                 onClick={() => handleCopy(promptData?.factory || '', 'factory')}
                 className="hover:text-white flex items-center gap-1 font-mono cursor-pointer"
@@ -528,7 +571,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               </button>
             </div>
             <textarea
-              value={promptData?.factory || 'Заводской промпт встроен в модуль criteria.py'}
+              value={promptData?.factory || 'Исходный шаблон инструкции загружается автоматически'}
               readOnly
               rows={22}
               className="w-full bg-[#120E27]/50 border border-indigo-900/40 rounded-2xl p-4 text-xs font-mono text-slate-400 focus:outline-none resize-y leading-relaxed"
@@ -536,11 +579,11 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
           </div>
         )}
 
-        {/* История изменений промптов */}
+        {/* История изменений правил */}
         {activeSubTab === 'audit' && (
           <div className="space-y-3">
             <div className="text-xs text-indigo-300">
-              Последние зафиксированные действия с промптом и критериями в базе данных:
+              Последние изменения правил проверки и списка критериев:
             </div>
             <div className="overflow-x-auto border border-indigo-900/50 rounded-2xl">
               <table className="w-full text-left text-xs">

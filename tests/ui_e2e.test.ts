@@ -245,13 +245,59 @@ describe('E2E UI тесты в Headless Chromium (Playwright)', () => {
     await page.getByPlaceholder('000000').fill(seniorOtp);
     await page.getByRole('button', { name: /Войти в личный кабинет/i }).click();
 
-    // 2. Проверяем видимость всех вкладок Senior Curator
+    // 2. Проверяем видимость всех вкладок Senior Curator и отсутствие Брендбука
     await page.getByRole('button', { name: /Дашборд преподавателей/i }).waitFor({ state: 'visible' });
     await page.getByRole('button', { name: /Проверить встречу КТалк/i }).waitFor({ state: 'visible' });
-    await page.getByRole('button', { name: /Редактор промпта ИИ/i }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: /Правила проверки/i }).waitFor({ state: 'visible' });
     await page.getByRole('button', { name: /Управление кураторами/i }).waitFor({ state: 'visible' });
-    const aiTabBtn = page.getByRole('button', { name: /Токены и модели ИИ/i });
+    const aiTabBtn = page.getByRole('button', { name: /Лимиты и модели/i });
     await aiTabBtn.waitFor({ state: 'visible' });
+    assert.equal(await page.getByRole('button', { name: /Брендбук/i }).count(), 0);
+
+    // Проверяем, что при 1 активной лекции ожидающая отображается как "В очереди #1" без надписи FIFO
+    const dbSeed = new DatabaseSync(path.join(tempDataDir, 'app_database.sqlite'));
+    try {
+      dbSeed.prepare(`
+        INSERT INTO lecture_tasks (
+          id, lecture_url, teacher_name, subject, group_name, date, status, progress_pct, curator_email, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'lec_ui_running_1',
+        'https://olymp.ktalk.ru/recordings/ui_running_1',
+        'Идёт Проверка',
+        'Математика',
+        '10 класс',
+        '2026-11-15 18:00',
+        'analyzing',
+        85,
+        'other.curator@olympiadpractices.ru',
+        new Date(Date.now() - 2000).toISOString()
+      );
+      dbSeed.prepare(`
+        INSERT INTO lecture_tasks (
+          id, lecture_url, teacher_name, subject, group_name, date, status, progress_pct, curator_email, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'lec_ui_queued_2',
+        'https://olymp.ktalk.ru/recordings/ui_queued_2',
+        'Вторая В Очереди',
+        'Физика',
+        '11 класс',
+        '2026-11-15 18:05',
+        'pending',
+        0,
+        'other.curator@olympiadpractices.ru',
+        new Date(Date.now() - 1000).toISOString()
+      );
+    } finally {
+      dbSeed.close();
+    }
+
+    await page.reload({ waitUntil: 'networkidle' });
+    const queuedRow = page.locator('tbody tr', { hasText: 'Вторая В Очереди' }).first();
+    await queuedRow.waitFor({ state: 'visible' });
+    await queuedRow.getByText('В очереди #1').waitFor({ state: 'visible' });
+    assert.equal(await page.getByText(/\bFIFO\b/i).count(), 0);
 
     // 3. Проверка телеметрии модели и токенов в таблице дашборда (до нажатия Перепроверить)
     const fokinaRow = page.locator('tbody tr', { hasText: 'Анна Фокина' }).first();
@@ -263,23 +309,28 @@ describe('E2E UI тесты в Headless Chromium (Playwright)', () => {
 
     // 4. Открытие карточки отчёта, проверка модели, телеметрии и кнопки «Отправить на перепроверку»
     await fokinaRow.getByRole('button', { name: /Подробнее/i }).click();
-    await page.getByText(/Технический учёт запроса ИИ/i).waitFor({ state: 'visible' });
+    await page.getByText(/Расход ресурсов на проверку/i).waitFor({ state: 'visible' });
     await page.getByText(/Модель:\s*GigaChat-2-Max/i).waitFor({ state: 'visible' });
     const modalRetryBtn = page.getByRole('button', { name: /Отправить на перепроверку/i });
     await modalRetryBtn.waitFor({ state: 'visible' });
 
-    // Закрываем пока карточку, сперва проверим окно «Токены и модели ИИ»
+    // Закрываем пока карточку, сперва проверим окно «Лимиты и модели»
     await page.getByRole('button', { name: /Закрыть отчет/i }).click();
 
-    // 5. Открытие «Токены и модели ИИ», изменение бюджета до 192k, сохранение и проверка после перезагрузки
+    // 5. Проверяем текстовую расшифровку кнопок на вкладке «Правила проверки» и переходим в «Лимиты и модели»
+    await page.getByRole('button', { name: /Правила проверки/i }).click();
+    await page.getByText(/Что означает каждая вкладка и кнопка:/i).waitFor({ state: 'visible' });
+    await page.getByText(/ваша собственная резервная версия инструкции/i).waitFor({ state: 'visible' });
+
+    // Открытие «Лимиты и модели», изменение бюджета до 192k, сохранение и проверка после перезагрузки
     await aiTabBtn.click();
-    await page.getByText(/Динамический расчётный лимит токенов/i).waitFor({ state: 'visible' });
+    await page.getByText(/Расчётный лимит токенов на одно занятие/i).waitFor({ state: 'visible' });
     await page.getByRole('button', { name: '192k', exact: true }).click();
     await page.getByRole('button', { name: /Сохранить лимит/i }).click();
     await page.getByText(/192\s*000 токенов.*сохранены/i).waitFor({ state: 'visible' });
 
     await page.reload({ waitUntil: 'networkidle' });
-    await page.getByRole('button', { name: /Токены и модели ИИ/i }).click();
+    await page.getByRole('button', { name: /Лимиты и модели/i }).click();
     const limitNumberInput = page.locator('input[type="number"]').first();
     await limitNumberInput.waitFor({ state: 'visible' });
     assert.equal(await limitNumberInput.inputValue(), '192000');
@@ -288,13 +339,50 @@ describe('E2E UI тесты в Headless Chromium (Playwright)', () => {
     await page.getByRole('button', { name: /Дашборд преподавателей/i }).click();
     await page.locator('tbody tr', { hasText: 'Анна Фокина' }).first().getByRole('button', { name: /Подробнее/i }).click();
     await page.getByRole('button', { name: /Отправить на перепроверку/i }).click();
-    await page.getByText(/возвращена в очередь FIFO/i).waitFor({ state: 'visible' });
+    await page.getByText(/возвращена в очередь на повторную проверку/i).waitFor({ state: 'visible' });
 
-    // Небольшая пауза, чтобы python-процесс с пустыми ключами успел завершиться до переключения пользователя
-    await page.waitForTimeout(800);
+    // Дожидаемся, пока диспетчер очереди завершит выполнение фоновых python-процессов с пустыми ключами
+    const queueDrainDeadline = Date.now() + 15_000;
+    while (Date.now() < queueDrainDeadline) {
+      const dbPoll = new DatabaseSync(path.join(tempDataDir, 'app_database.sqlite'));
+      let stillQueuedOrRunning = 0;
+      try {
+        const row = dbPoll.prepare(
+          `SELECT COUNT(*) AS cnt FROM lecture_tasks WHERE id IN ('lec_ui_fokina', 'lec_ui_queued_2') AND status IN ('pending', 'downloading', 'extracting', 'uploading', 'analyzing')`
+        ).get() as { cnt: number };
+        stillQueuedOrRunning = row.cnt;
+      } finally {
+        dbPoll.close();
+      }
+      if (stillQueuedOrRunning === 0) break;
+      await page.waitForTimeout(250);
+    }
+    // Небольшой запас, чтобы processLectureQueue успел выйти из цикла while
+    await page.waitForTimeout(300);
 
-    // 7. Добавляем ещё одну завершённую лекцию для проверки RBAC-отображения под обычным куратором
+    // 7. Добавляем ещё одну завершённую лекцию и свежую ожидающую лекцию от имени другого куратора для проверки общего дашборда и RBAC
     seedCompletedLecture(tempDataDir, 'lec_ui_curator_view', 'Иван Петров');
+    const dbCuratorSeed = new DatabaseSync(path.join(tempDataDir, 'app_database.sqlite'));
+    try {
+      dbCuratorSeed.prepare(`
+        INSERT OR REPLACE INTO lecture_tasks (
+          id, lecture_url, teacher_name, subject, group_name, date, status, progress_pct, curator_email, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'lec_ui_queued_2',
+        'https://olymp.ktalk.ru/recordings/ui_queued_2',
+        'Вторая В Очереди',
+        'Физика',
+        '11 класс',
+        '2026-11-15 18:05',
+        'pending',
+        0,
+        'other.curator@olympiadpractices.ru',
+        new Date().toISOString()
+      );
+    } finally {
+      dbCuratorSeed.close();
+    }
 
     // Выход и вход под обычным куратором
     await page.getByTitle('Выйти из аккаунта').click();
@@ -306,9 +394,14 @@ describe('E2E UI тесты в Headless Chromium (Playwright)', () => {
     await page.getByRole('button', { name: /Войти в личный кабинет/i }).click();
 
     await page.getByRole('button', { name: /Дашборд преподавателей/i }).waitFor({ state: 'visible' });
-    assert.equal(await page.getByRole('button', { name: /Токены и модели ИИ/i }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: /Лимиты и модели/i }).count(), 0);
     assert.equal(await page.getByRole('button', { name: /Управление кураторами/i }).count(), 0);
-    assert.equal(await page.getByRole('button', { name: /Редактор промпта ИИ/i }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: /Правила проверки/i }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: /Брендбук/i }).count(), 0);
+
+    // Обычный куратор видит на общем дашборде и лекции старшего, и лекции других кураторов
+    await page.locator('tbody tr', { hasText: 'Идёт Проверка' }).first().waitFor({ state: 'visible' });
+    await page.locator('tbody tr', { hasText: 'Вторая В Очереди' }).first().getByText('В очереди #1').waitFor({ state: 'visible' });
 
     const petrovRow = page.locator('tbody tr', { hasText: 'Иван Петров' }).first();
     await petrovRow.waitFor({ state: 'visible' });
@@ -318,7 +411,7 @@ describe('E2E UI тесты в Headless Chromium (Playwright)', () => {
 
     await petrovRow.getByRole('button', { name: /Подробнее/i }).click();
     await page.getByText(/Модель:\s*GigaChat-2-Max/i).waitFor({ state: 'visible' });
-    assert.equal(await page.getByText(/Технический учёт запроса ИИ/i).count(), 0);
+    assert.equal(await page.getByText(/Расход ресурсов на проверку/i).count(), 0);
 
     assert.deepEqual(pageErrors, [], `Обнаружены JS-ошибки на странице: ${pageErrors.join('; ')}`);
     assert.deepEqual(server500s, [], `Обнаружены 5xx ответы сервера: ${server500s.join('; ')}`);

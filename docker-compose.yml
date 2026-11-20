@@ -80,5 +80,31 @@ services:
         max-size: "20m"
         max-file: "3"
 
+  postgres_backup:
+    image: postgres:16-alpine
+    container_name: lecture-ai-postgres-backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${DB_USER:-postgres}
+      PGPASSWORD: ${DB_PASSWORD:-postgres_password}
+      PGDATABASE: ${DB_NAME:-lecture_db}
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_INTERVAL_SEC: ${BACKUP_INTERVAL_SEC:-86400}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/docker_daily_backup.sh:/usr/local/bin/docker_daily_backup.sh:ro
+    command: ["sh", "/usr/local/bin/docker_daily_backup.sh"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
 volumes:
   postgres_data:

@@ -36,7 +36,7 @@ MODEL_ROTATION_CHAIN: List[str] = [
 ]
 
 DEFAULT_AI_SETTINGS: Dict[str, Any] = {
-    "maxRequestTokens": 128_000,
+    "maxRequestTokens": 100_000,
     "reservedOutputTokens": 8_192,
     "enableModelRotation": True,
 }

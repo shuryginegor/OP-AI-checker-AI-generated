@@ -184,6 +184,8 @@ dist-ssr/
 data/*.sqlite*
 data/*.json
 !data/criteria_active.json
+backups/
+data/backups/
 
 # Logs
 *.log

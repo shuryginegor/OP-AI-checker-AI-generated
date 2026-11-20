@@ -9,7 +9,7 @@
     "lint": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
     "start": "node dist/server.cjs",
     "test:python": "sh -c 'PY=\"python3\"; if [ -x \".venv/bin/python3\" ]; then PY=\".venv/bin/python3\"; fi; \"$PY\" -m unittest discover -s tests -p \"test_*.py\" -v'",
-    "test:api": "tsx --test tests/api_rbac.test.ts",
+    "test:api": "tsx --test tests/api_rbac.test.ts tests/backup_daily.test.ts",
     "test:ui": "tsx --test tests/ui_e2e.test.ts",
     "test": "npm run test:python && npm run test:api && npm run test:ui"
   },

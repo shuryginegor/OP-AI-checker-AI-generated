@@ -16,8 +16,6 @@ import {
   Zap,
   Clock,
   ExternalLink,
-  Palette,
-  Globe,
   GraduationCap,
   Loader2,
   BarChart3,
@@ -103,7 +101,7 @@ function OlympHeaderLogo() {
           </span>
         </div>
         <span className="text-[10px] text-indigo-300/80 font-medium tracking-wide mt-0.5">
-          Система методического аудита вебинаров КТалк • Сбер GigaChat (Pro / Max / Ultra)
+          Портал контроля качества онлайн-занятий
         </span>
       </div>
     </div>
@@ -143,15 +141,6 @@ const CRITICAL_CRITERIA = [
   { id: 6, title: "Утечка конфиденциальных данных", desc: "Демонстрация персональных данных, личной переписки или приватной информации." },
   { id: 7, title: "Заведомо ложный материал", desc: "Выдача заведомо неверного ответа, правила или алгоритма без исправления." },
   { id: 8, title: "Длительное отсутствие", desc: "Отсутствие преподавателя или учебной работы в течение значительной части занятия." }
-];
-
-const BRAND_COLORS = [
-  { name: "Brand Primary Indigo", hex: "#4F3B9B", rgb: "79, 59, 155", desc: "Основной глубокий цвет брендбука (фон, плашки, градиенты)" },
-  { name: "Deep Royal Night", hex: "#14102C", rgb: "20, 16, 44", desc: "Фоновый темный цвет приложения и контрастных блоков" },
-  { name: "Vivid Coral Accent", hex: "#FF5252", rgb: "255, 82, 82", desc: "Акцентный яркий кораллово-красный (критерии, кнопки, важные плашки)" },
-  { name: "Electric Cyan", hex: "#38BDF8", rgb: "56, 189, 248", desc: "Технологический голубой (ИИ статусы, бейджи, ссылки)" },
-  { name: "Emerald Pass", hex: "#10B981", rgb: "16, 185, 129", desc: "Цвет успешной прохождения контроля и высоких баллов" },
-  { name: "Warm Amber Warning", hex: "#F59E0B", rgb: "245, 158, 11", desc: "Внимание, рекомендации, средняя оценка критериев" },
 ];
 
 interface CuratorUser {
@@ -227,7 +216,7 @@ export default function App() {
   const [loginMessage, setLoginMessage] = useState<string>('');
 
   // Вкладки
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'submit' | 'curators' | 'audit' | 'criteria' | 'prompt_editor' | 'ai_limits' | 'brandbook' | 'criteria_manager'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'submit' | 'curators' | 'audit' | 'criteria' | 'prompt_editor' | 'ai_limits' | 'criteria_manager'>('dashboard');
 
   // Дашборд и задачи
   const [tasks, setTasks] = useState<any[]>([]);
@@ -522,7 +511,7 @@ export default function App() {
     }
   };
 
-  // Повторный запуск любой завершённой, сбойной или повреждённой лекции в очередь FIFO
+  // Повторный запуск любой завершённой, сбойной или прерванной проверки в очередь
   const handleRetryTask = async (e: React.MouseEvent, taskId: string) => {
     e.stopPropagation();
     if (!authToken || retryingTaskId) return;
@@ -535,7 +524,7 @@ export default function App() {
       });
       const data = await res.json();
       if (res.ok && data.success) {
-        setDashboardNotice(data.message || 'Лекция возвращена в очередь FIFO на повторную проверку.');
+        setDashboardNotice(data.message || 'Лекция возвращена в очередь на повторную проверку.');
         if (rawJsonModalTask?.id === taskId) {
           setRawJsonModalTask(null);
         }
@@ -1218,7 +1207,7 @@ export default function App() {
               }`}
             >
               <Database className="w-3.5 h-3.5 text-[#38BDF8]" />
-              <span>Аудит действий (БД)</span>
+              <span>История действий</span>
               <span className="text-[9px] bg-cyan-500/20 text-[#38BDF8] px-1.5 py-0.2 rounded font-bold border border-cyan-500/30">
                 Senior
               </span>
@@ -1235,7 +1224,7 @@ export default function App() {
               }`}
             >
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>Редактор промпта ИИ</span>
+              <span>Правила проверки</span>
               <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded font-bold border border-amber-500/30">
                 Senior
               </span>
@@ -1252,24 +1241,12 @@ export default function App() {
               }`}
             >
               <Cpu className="w-3.5 h-3.5 text-[#38BDF8]" />
-              <span>Токены и модели ИИ</span>
+              <span>Лимиты и модели</span>
               <span className="text-[9px] bg-cyan-500/20 text-[#38BDF8] px-1.5 py-0.2 rounded font-bold border border-cyan-500/30">
                 Senior
               </span>
             </button>
           )}
-
-          <button
-            onClick={() => setActiveTab('brandbook')}
-            className={`px-4 py-2 text-xs font-semibold rounded-t-xl transition-all flex items-center gap-2 border-b-2 ${
-              activeTab === 'brandbook'
-                ? 'border-[#FF5252] text-white bg-[#2B2363]'
-                : 'border-transparent text-indigo-200/70 hover:text-white hover:bg-[#241E4F]/60'
-            }`}
-          >
-            <Palette className="w-3.5 h-3.5 text-indigo-400" />
-            Брендбук & Стиль
-          </button>
         </div>
       </header>
 
@@ -1321,7 +1298,7 @@ export default function App() {
                 <div className="text-2xl font-black text-white mt-1 tabular-nums">
                   {validCompletedTasks.length}
                 </div>
-                <div className="text-[10px] text-emerald-400 mt-1">Успешно оценено GigaChat</div>
+                <div className="text-[10px] text-emerald-400 mt-1">Завершённые проверки</div>
               </div>
 
               <div className="bg-[#1B153B] border border-indigo-800/50 rounded-2xl p-4">
@@ -1336,7 +1313,7 @@ export default function App() {
                   )}
                 </div>
                 <div className="text-[10px] text-indigo-300 mt-1">
-                  {avgScore !== null ? 'Только валидные проверки' : 'Нет завершённых оценок'}
+                  {avgScore !== null ? 'По всем проверенным занятиям' : 'Нет завершённых оценок'}
                 </div>
               </div>
 
@@ -1409,13 +1386,13 @@ export default function App() {
                     <span className="inline-flex items-center gap-1.5 text-[11px] text-cyan-300 font-semibold bg-cyan-500/10 border border-cyan-500/30 px-2.5 py-1 rounded-lg">
                       <Clock className="w-3.5 h-3.5 text-cyan-400" />
                       <span>
-                        Очередь GigaChat: в работе {activeWorkerTasks.length} • ожидают {queuedPendingTasks.length}
+                        Сейчас проверяется: {activeWorkerTasks.length} • в очереди: {queuedPendingTasks.length}
                       </span>
                     </span>
                   )}
                 </div>
                 <span className="text-xs text-indigo-300">
-                  Кликните по строке для детального отчета с таймкодами
+                  Нажмите на строку, чтобы открыть подробный разбор занятия
                 </span>
               </div>
 
@@ -1427,8 +1404,8 @@ export default function App() {
                       <th className="px-6 py-3">Преподаватель</th>
                       <th className="px-6 py-3">Предмет & Группа</th>
                       <th className="px-6 py-3">Ссылка на занятие</th>
-                      <th className="px-6 py-3 text-center">Балл ИИ</th>
-                      <th className="px-6 py-3">Статус обработки</th>
+                      <th className="px-6 py-3 text-center">Оценка</th>
+                      <th className="px-6 py-3">Статус проверки</th>
                       <th className="px-6 py-3 text-right">Действие</th>
                     </tr>
                   </thead>
@@ -1522,7 +1499,7 @@ export default function App() {
                             <div className="space-y-1">
                               <span className="inline-flex items-center gap-1.5 text-[11px] text-rose-300 font-semibold bg-rose-500/10 border border-rose-500/30 px-2.5 py-1 rounded-lg">
                                 <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                                <span>{t.isCorrupted ? 'Разбор повреждён' : 'Ошибка проверки'}</span>
+                                <span>{t.isCorrupted ? 'Не удалось разобрать отчёт' : 'Ошибка проверки'}</span>
                               </span>
                               {t.errorMessage && (
                                 <div className="text-[11px] text-rose-200/80 leading-snug line-clamp-2" title={t.errorMessage}>
@@ -1533,7 +1510,7 @@ export default function App() {
                           ) : t.isCorrupted ? (
                             <span className="inline-flex items-center gap-1.5 text-[11px] text-amber-300 font-semibold bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 rounded-lg">
                               <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                              Разбор повреждён
+                              Не удалось разобрать отчёт
                             </span>
                           ) : t.status === 'completed' ? (
                             <div className="space-y-1">
@@ -1556,7 +1533,7 @@ export default function App() {
                                             </span>
                                           </>
                                         ) : (
-                                          'Проверено GigaChat'
+                                          'Проверка завершена'
                                         )}
                                       </span>
                                     </span>
@@ -1575,7 +1552,7 @@ export default function App() {
                                         ) : typeof framesUp === 'number' ? (
                                           <span>{framesUp}{typeof framesPlan === 'number' ? `/${framesPlan}` : ''} кадр.</span>
                                         ) : (
-                                          <span className="text-indigo-400/70">До учёта токенов</span>
+                                          <span className="text-indigo-400/70">Без учёта токенов</span>
                                         )}
                                       </div>
                                     )}
@@ -1587,7 +1564,7 @@ export default function App() {
                             <span className="inline-flex items-center gap-1.5 text-[11px] text-indigo-200 font-semibold bg-indigo-500/15 border border-indigo-400/30 px-2.5 py-1 rounded-lg">
                               <Clock className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
                               <span>
-                                В очереди FIFO {t.queuePosition ? `(#${t.queuePosition})` : ''}
+                                В очереди {t.queuePosition ? `#${t.queuePosition}` : ''}
                               </span>
                             </span>
                           ) : (
@@ -1595,12 +1572,12 @@ export default function App() {
                               <span className="inline-flex items-center gap-1.5 text-[11px] text-[#38BDF8] font-medium">
                                 <Loader2 className="w-3 h-3 animate-spin" />
                                 {t.status === 'downloading'
-                                  ? 'Загрузка видео (КТалк)...'
+                                  ? 'Скачиваем видеозапись...'
                                   : t.status === 'extracting'
-                                  ? 'Нарезка аудио и кадров...'
+                                  ? 'Готовим аудио и кадры...'
                                   : t.status === 'uploading'
-                                  ? 'Выгрузка в GigaChat...'
-                                  : 'Анализ нейросетью...'}
+                                  ? 'Загружаем материалы...'
+                                  : 'Идёт проверка занятия...'}
                               </span>
                               <div className="w-28 bg-[#14102C] h-1.5 rounded-full overflow-hidden">
                                 <div
@@ -1616,16 +1593,16 @@ export default function App() {
                             <button
                               disabled
                               className="px-2.5 py-1.5 bg-indigo-950/50 border border-indigo-700/40 text-indigo-300/80 rounded-xl text-xs font-medium cursor-not-allowed ml-auto flex items-center gap-1.5"
-                              title="Лекция ожидает своей очереди на анализ в GigaChat"
+                              title="Занятие ожидает своей очереди на проверку"
                             >
                               <Clock className="w-3 h-3 text-cyan-400" />
-                              <span>Ожидает {t.queuePosition ? `#${t.queuePosition}` : '...'}</span>
+                              <span>Ожидает</span>
                             </button>
                           ) : isInProgress ? (
                             <button
                               disabled
                               className="px-2.5 py-1.5 bg-indigo-950/30 border border-indigo-800/20 text-indigo-400/40 rounded-xl text-xs font-medium cursor-not-allowed ml-auto flex items-center gap-1.5"
-                              title="Проверка лекции еще выполняется"
+                              title="Проверка занятия ещё выполняется"
                             >
                               <span>В процессе...</span>
                             </button>
@@ -1636,7 +1613,7 @@ export default function App() {
                                 onClick={(e) => handleRetryTask(e, t.id)}
                                 disabled={retryingTaskId === t.id}
                                 className="px-2.5 py-1.5 bg-[#14102C] hover:bg-[#241E4F] border border-indigo-700/60 text-indigo-200 hover:text-white disabled:opacity-50 rounded-xl text-xs font-semibold transition-all inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-                                title="Отправить эту лекцию на повторную проверку в очередь FIFO"
+                                title="Отправить это занятие на повторную проверку"
                               >
                                 <RotateCcw className={`w-3.5 h-3.5 text-[#38BDF8] ${retryingTaskId === t.id ? 'animate-spin' : ''}`} />
                                 <span>{retryingTaskId === t.id ? 'Запуск...' : 'Перепроверить'}</span>
@@ -1660,7 +1637,7 @@ export default function App() {
                                 onClick={(e) => handleRetryTask(e, t.id)}
                                 disabled={retryingTaskId === t.id}
                                 className="px-3 py-1.5 bg-[#FF5252] hover:bg-[#ff3b3b] disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-                                title="Повторно поставить лекцию в очередь проверки GigaChat"
+                                title="Повторно поставить занятие в очередь проверки"
                               >
                                 <RotateCcw className={`w-3.5 h-3.5 ${retryingTaskId === t.id ? 'animate-spin' : ''}`} />
                                 <span>{retryingTaskId === t.id ? 'Запуск...' : 'Повторить'}</span>
@@ -1673,7 +1650,7 @@ export default function App() {
                                     setRawJsonModalTask(t);
                                   }}
                                   className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 hover:text-white rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1 cursor-pointer shrink-0"
-                                  title="Открыть сырой ответ / ошибку"
+                                  title="Посмотреть детали ошибки"
                                 >
                                   <FileText className="w-3.5 h-3.5 text-amber-400" />
                                 </button>
@@ -1694,7 +1671,7 @@ export default function App() {
                             </div>
                             <p className="text-indigo-300/80 text-xs">
                               {tasks.length === 0
-                                ? 'В системе пока нет загруженных занятий. Перейдите во вкладку «Проверить встречу КТалк», чтобы запустить первый методический аудит.'
+                                ? 'В системе пока нет проверенных занятий. Перейдите во вкладку «Проверить встречу КТалк», чтобы отправить первую запись.'
                                 : 'Попробуйте сбросить фильтр преподавателя или поисковый запрос.'}
                             </p>
                             {tasks.length === 0 && (
@@ -1741,13 +1718,13 @@ export default function App() {
               <div className="bg-gradient-to-r from-[#241E4F] via-[#2B2363] to-[#1F1A44] border border-indigo-500/30 rounded-3xl p-6 shadow-xl flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div className="space-y-1.5">
                   <div className="text-[11px] font-bold uppercase tracking-wider text-[#38BDF8]">
-                    Контур.Толк • Авто-синхронизация каждые 5 минут
+                    Контур.Толк • Автообновление каждые 5 минут
                   </div>
                   <h2 className="text-xl font-black text-white">
                     Новые записи вебинаров и отправка на проверку
                   </h2>
                   <p className="text-xs text-indigo-200/80 leading-relaxed max-w-3xl">
-                    Нажмите на любую непроверенную встречу — откроется окно отправки на проверку со всеми метаданными КТалк (название, дата, время, длительность, ведущий) и подставленной ссылкой. Преподавателя, предмет и группу заполните вручную перед отправкой в очередь GigaChat.
+                    Нажмите на любую непроверенную встречу — откроется окно с её данными и ссылкой. Укажите преподавателя, предмет и группу и отправьте запись на проверку.
                   </p>
                 </div>
 
@@ -2074,7 +2051,7 @@ export default function App() {
                           ) : t.status === 'failed' || t.isCorrupted ? (
                             <span className="px-3 py-1 rounded-xl font-semibold text-xs bg-rose-500/20 text-rose-300 border border-rose-500/30 inline-flex items-center gap-1.5">
                               <AlertTriangle className="w-3 h-3" />
-                              {t.isCorrupted ? 'Сбой JSON' : 'Ошибка'}
+                              {t.isCorrupted ? 'Ошибка отчёта' : 'Ошибка'}
                             </span>
                           ) : t.status === 'pending' ? (
                             <span className="px-3 py-1 rounded-xl font-semibold text-xs bg-indigo-500/15 text-indigo-200 border border-indigo-400/30 inline-flex items-center gap-1.5">
@@ -2086,7 +2063,7 @@ export default function App() {
                               <div className="flex items-center gap-1.5 text-[10px] text-[#38BDF8]">
                                 <Loader2 className="w-3 h-3 animate-spin" />
                                 <span>
-                                  {t.progressPct}% • {t.status === 'downloading' ? 'Загрузка...' : t.status === 'extracting' ? 'Нарезка...' : t.status === 'uploading' ? 'Выгрузка...' : 'ИИ-анализ...'}
+                                  {t.progressPct}% • {t.status === 'downloading' ? 'Скачивание...' : t.status === 'extracting' ? 'Подготовка...' : t.status === 'uploading' ? 'Загрузка...' : 'Проверка...'}
                                 </span>
                               </div>
                               <div className="w-full bg-indigo-950 h-1.5 rounded-full overflow-hidden">
@@ -2129,7 +2106,7 @@ export default function App() {
                 Управление командой кураторов и доступом к системе
               </h2>
               <p className="text-xs text-indigo-200/80 leading-relaxed max-w-3xl">
-                Здесь вы можете добавить email нового сотрудника, по которому тот сможет авторизоваться в системе. Также вы можете переводить обычных кураторов в статус «Старший куратор», открывая им доступ к редактированию системного промпта нейросети.
+                Здесь вы можете добавить email нового сотрудника, чтобы он смог войти в систему. При необходимости куратора можно назначить старшим — это откроет доступ к настройкам критериев, правил проверки и лимитов.
               </p>
             </div>
 
@@ -2333,14 +2310,14 @@ export default function App() {
                   <div>
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-black uppercase tracking-widest text-[#38BDF8]">
-                        Реляционная база данных (PostgreSQL / SQLite)
+                        Журнал событий системы
                       </span>
                       <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono border border-emerald-500/30">
-                        152-ФЗ активен
+                        Хранение по 152-ФЗ
                       </span>
                     </div>
                     <h2 className="text-lg font-black text-white">
-                      Журнал аудита действий (Audit Trail в БД)
+                      История действий кураторов и проверок
                     </h2>
                   </div>
                 </div>
@@ -2352,33 +2329,33 @@ export default function App() {
                     className="px-4 py-2 bg-[#14102C] hover:bg-cyan-950/40 border border-cyan-700/50 text-[#38BDF8] rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2"
                   >
                     <RotateCcw className={`w-3.5 h-3.5 ${isLoadingAudit ? 'animate-spin' : ''}`} />
-                    <span>Обновить из БД</span>
+                    <span>Обновить</span>
                   </button>
                 </div>
               </div>
 
               <p className="text-xs text-indigo-200/80 leading-relaxed">
-                Каждое действие в системе немедленно и неизменяемо фиксируется в реляционной таблице <code className="text-cyan-300 font-mono">audit_logs</code> (PostgreSQL 16 с сохранением в persistent volume <code className="text-cyan-300 font-mono">/data</code>): авторизации, выдача ролей, добавление email в белый список, отправка записей КТалк, экспорт отчетов и изменение системных промптов нейросети.
+                Здесь фиксируются все ключевые события: входы сотрудников, изменение ролей и белого списка, отправка записей на проверку, выгрузка отчётов и обновление критериев.
               </p>
 
               {/* Мини-статистика аудита */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-indigo-900/40">
                 <div className="p-3 bg-[#14102C] rounded-xl border border-indigo-900/60">
-                  <div className="text-[10px] text-indigo-400 font-medium">Всего записей в audit_logs</div>
+                  <div className="text-[10px] text-indigo-400 font-medium">Записей в журнале</div>
                   <div className="text-lg font-black font-mono text-cyan-400 mt-0.5">
                     {auditLogs.length} событий
                   </div>
                 </div>
                 <div className="p-3 bg-[#14102C] rounded-xl border border-indigo-900/60">
-                  <div className="text-[10px] text-indigo-400 font-medium">Хранилище транзакций</div>
+                  <div className="text-[10px] text-indigo-400 font-medium">Надёжность хранения</div>
                   <div className="text-lg font-black font-mono text-emerald-400 mt-0.5">
-                    PostgreSQL 16 / WAL
+                    Автосохранение
                   </div>
                 </div>
                 <div className="p-3 bg-[#14102C] rounded-xl border border-indigo-900/60">
-                  <div className="text-[10px] text-indigo-400 font-medium">Срок хранения логов</div>
+                  <div className="text-[10px] text-indigo-400 font-medium">Срок хранения</div>
                   <div className="text-lg font-black font-mono text-indigo-200 mt-0.5">
-                    Бессрочно (Архив)
+                    Без ограничений
                   </div>
                 </div>
               </div>
@@ -2390,7 +2367,7 @@ export default function App() {
                 <Search className="w-4 h-4 absolute left-3.5 top-3 text-indigo-400" />
                 <input
                   type="text"
-                  placeholder="Поиск по актору, типу действия, объекту или IP..."
+                  placeholder="Поиск по сотруднику, событию, занятию или IP..."
                   value={auditSearch}
                   onChange={(e) => setAuditSearch(e.target.value)}
                   className="w-full pl-10 pr-4 py-2 bg-[#1B153B] border border-indigo-800/50 rounded-xl text-xs text-white placeholder-indigo-400 focus:outline-none focus:border-[#38BDF8]"
@@ -2404,12 +2381,12 @@ export default function App() {
                 <table className="w-full text-left text-xs text-slate-300">
                   <thead className="bg-[#14102C] text-indigo-300 uppercase text-[10px] font-bold tracking-wider border-b border-indigo-900/60">
                     <tr>
-                      <th className="px-5 py-3">Время (UTC/МСК)</th>
-                      <th className="px-5 py-3">Куратор / Актор</th>
-                      <th className="px-5 py-3">Действие в системе</th>
-                      <th className="px-5 py-3">Целевой объект</th>
-                      <th className="px-5 py-3">Подробности транзакции</th>
-                      <th className="px-5 py-3 text-right">IP адрес</th>
+                      <th className="px-5 py-3">Дата и время</th>
+                      <th className="px-5 py-3">Сотрудник</th>
+                      <th className="px-5 py-3">Событие</th>
+                      <th className="px-5 py-3">Занятие / объект</th>
+                      <th className="px-5 py-3">Подробности</th>
+                      <th className="px-5 py-3 text-right">IP-адрес</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-indigo-900/30">
@@ -2618,73 +2595,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ======================================================== */}
-        {/* ВКЛАДКА 6: БРЕНДБУК И СТИЛЬ                              */}
-        {/* ======================================================== */}
-        {activeTab === 'brandbook' && (
-          <div className="space-y-6 animate-fade-in">
-            <div className="bg-gradient-to-r from-[#2B2363] via-[#3A2E80] to-[#1F1A44] border border-indigo-500/30 rounded-3xl p-8 space-y-4 shadow-xl">
-              <div className="flex items-center justify-between flex-wrap gap-4">
-                <div className="flex items-center gap-3">
-                  <OlympLogo className="w-12 h-12 shadow-lg shadow-indigo-900/50" />
-                  <div>
-                    <div className="text-xs font-black uppercase tracking-widest text-[#FF5252]">
-                      Брендбук и Фирменный Стиль
-                    </div>
-                    <h2 className="text-xl font-black text-white">
-                      «Олимпиадные Практики» (olympiadpractices.ru)
-                    </h2>
-                  </div>
-                </div>
-
-                <a
-                  href="https://olympiadpractices.ru/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="bg-[#241E4F] border border-indigo-500/40 text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-[#2B2363] transition-colors flex items-center gap-2"
-                >
-                  <Globe className="w-4 h-4 text-[#38BDF8]" />
-                  <span>Перейти на сайт olympiadpractices.ru</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
-              </div>
-
-              <p className="text-xs text-indigo-100/90 leading-relaxed max-w-4xl">
-                Брендинг компании сочетает академическую строгость ведущих олимпиадных институтов и технологическую платформу. Цветовая палитра строится на контрасте глубокого королевского индиго, яркого коралла и технического голубого цвета.
-              </p>
-            </div>
-
-            <div className="bg-[#1B153B] border border-indigo-800/50 rounded-3xl p-6 space-y-4">
-              <h3 className="text-sm font-bold text-white flex items-center gap-2 border-b border-indigo-900/50 pb-3">
-                <Palette className="w-4 h-4 text-[#FF5252]" />
-                Фирменная палитра цветов (Brand Palette)
-              </h3>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {BRAND_COLORS.map((col) => (
-                  <div key={col.hex} className="bg-[#14102C] border border-indigo-900/60 rounded-2xl p-4 space-y-3">
-                    <div
-                      className="w-full h-16 rounded-xl border border-white/10 shadow-inner flex items-end justify-end p-2"
-                      style={{ backgroundColor: col.hex }}
-                    >
-                      <span className="text-[10px] font-mono font-bold bg-black/60 text-white px-2 py-0.5 rounded backdrop-blur-sm">
-                        {col.hex}
-                      </span>
-                    </div>
-                    <div>
-                      <div className="text-xs font-bold text-white">{col.name}</div>
-                      <div className="text-[10px] font-mono text-indigo-300">RGB: {col.rgb}</div>
-                      <p className="text-[11px] text-indigo-200/70 mt-1 leading-relaxed">
-                        {col.desc}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
       </main>
 
       {/* МОДАЛЬНОЕ ОКНО ДЕТАЛЬНОГО ОТЧЕТА ПО ЗАНЯТИЮ */}
@@ -2767,16 +2677,16 @@ export default function App() {
                 </div>
               )}
 
-              {/* Метаданные встречи КТалк (извлеченные через KTalk API) */}
+              {/* Данные встречи из Контур.Толка */}
               {activeDetailTask.talkMetadata && (
                 <div className="bg-[#14102C] border border-[#38BDF8]/40 rounded-2xl p-4 space-y-3 shadow-md">
                   <div className="flex items-center justify-between border-b border-indigo-900/50 pb-2">
                     <div className="flex items-center gap-2 text-[#38BDF8] font-bold text-xs uppercase tracking-wider">
                       <Video className="w-4 h-4 text-[#38BDF8]" />
-                      <span>Метаданные встречи КТалк</span>
+                      <span>Данные встречи в Контур.Толке</span>
                     </div>
                     <span className="text-[10px] font-mono bg-cyan-950 text-cyan-300 border border-cyan-800 px-2 py-0.5 rounded">
-                      KTalk API
+                      Контур.Толк
                     </span>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
@@ -2801,7 +2711,7 @@ export default function App() {
                       <span className="text-indigo-300 font-mono">{activeDetailTask.talkMetadata.login || '—'}</span>
                     </div>
                     <div>
-                      <span className="text-indigo-400 block text-[10px]">ID записи (recordingKey):</span>
+                      <span className="text-indigo-400 block text-[10px]">Ключ записи:</span>
                       <span className="text-cyan-300 font-mono text-[11px] truncate block" title={activeDetailTask.talkMetadata.recordingKey}>
                         {activeDetailTask.talkMetadata.recordingKey || '—'}
                       </span>
@@ -2810,13 +2720,13 @@ export default function App() {
                 </div>
               )}
 
-              {/* Телеметрия токенов, кадров и ротации моделей (ТОЛЬКО ДЛЯ СТАРШЕГО КУРАТОРА) */}
+              {/* Учёт ресурсов проверки (ТОЛЬКО ДЛЯ СТАРШЕГО КУРАТОРА) */}
               {isSenior && (activeDetailTask.tokenUsage || typeof activeDetailTask.framesUploaded === 'number' || activeDetailTask.aiModel) && (
                 <div className="bg-[#14102C] border border-indigo-800/60 rounded-2xl p-4 space-y-2.5">
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-900/50 pb-2">
                     <span className="text-xs font-bold text-white flex items-center gap-2">
                       <Cpu className="w-4 h-4 text-[#38BDF8]" />
-                      <span>Технический учёт запроса ИИ (виден только старшим кураторам)</span>
+                      <span>Расход ресурсов на проверку (видно только старшему куратору)</span>
                     </span>
                     <span className="text-[11px] font-mono text-indigo-300">
                       Модель отчёта: <strong className="text-white">{activeDetailTask.aiModel || activeDetailTask.talkMetadata?.aiModel || '—'}</strong>
@@ -2824,11 +2734,11 @@ export default function App() {
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                     <div>
-                      <span className="text-indigo-400 block text-[10px]">Токены запроса (факт)</span>
+                      <span className="text-indigo-400 block text-[10px]">Потрачено токенов</span>
                       <span className="font-mono tabular-nums font-bold text-[#38BDF8]">
                         {activeDetailTask.tokenUsage?.totalTokens
                           ? `${Number(activeDetailTask.tokenUsage.totalTokens).toLocaleString('ru-RU')} ток.`
-                          : 'До учёта токенов'}
+                          : 'Без учёта токенов'}
                       </span>
                       {activeDetailTask.tokenUsage?.totalTokens ? (
                         <div className="text-[10px] font-mono tabular-nums text-indigo-300/80 mt-0.5">
@@ -2837,7 +2747,7 @@ export default function App() {
                       ) : null}
                     </div>
                     <div>
-                      <span className="text-indigo-400 block text-[10px]">Отправлено видеокадров</span>
+                      <span className="text-indigo-400 block text-[10px]">Просмотрено кадров экрана</span>
                       <span className="font-mono tabular-nums font-bold text-white">
                         {typeof activeDetailTask.framesUploaded === 'number'
                           ? `${activeDetailTask.framesUploaded}${typeof activeDetailTask.framesPlanned === 'number' ? ` из ${activeDetailTask.framesPlanned}` : ''} кадр.`
@@ -2848,12 +2758,12 @@ export default function App() {
                       </div>
                     </div>
                     <div>
-                      <span className="text-indigo-400 block text-[10px]">Транскрипт и лимит запроса</span>
+                      <span className="text-indigo-400 block text-[10px]">Текст речи и лимит</span>
                       <span className="font-mono tabular-nums text-white font-semibold">
                         {activeDetailTask.tokenUsage
                           ? activeDetailTask.tokenUsage.transcriptTrimmed
-                            ? `Сжат (${Number(activeDetailTask.tokenUsage.transcriptSentChars || 0).toLocaleString('ru-RU')}/${Number(activeDetailTask.tokenUsage.transcriptOriginalChars || 0).toLocaleString('ru-RU')} симв.)`
-                            : 'Полный без обрезки'
+                            ? `Сокращён (${Number(activeDetailTask.tokenUsage.transcriptSentChars || 0).toLocaleString('ru-RU')}/${Number(activeDetailTask.tokenUsage.transcriptOriginalChars || 0).toLocaleString('ru-RU')} симв.)`
+                            : 'Передан полностью'
                           : '—'}
                       </span>
                       {activeDetailTask.tokenUsage?.configuredBudgetTokens ? (
@@ -2865,7 +2775,7 @@ export default function App() {
                   </div>
                   {Array.isArray(activeDetailTask.modelAttempts) && activeDetailTask.modelAttempts.length > 1 && (
                     <div className="pt-2 border-t border-indigo-900/40 text-[11px] text-indigo-300 font-mono">
-                      Цепочка перебора: {activeDetailTask.modelAttempts.map((a: any) => `${a.model} (${a.status})`).join(' → ')}
+                      Пробовали модели: {activeDetailTask.modelAttempts.map((a: any) => `${a.model} (${a.status})`).join(' → ')}
                     </div>
                   )}
                 </div>
@@ -3086,7 +2996,7 @@ export default function App() {
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full">
-                      {rawJsonModalTask.isCorrupted ? 'Разбор поврежден • Сбой JSON' : 'Ошибка выполнения проверки'}
+                      {rawJsonModalTask.isCorrupted ? 'Не удалось разобрать отчёт' : 'Ошибка проверки'}
                     </span>
                     <span className="text-xs text-indigo-400 font-mono">#{rawJsonModalTask.id}</span>
                   </div>
@@ -3116,10 +3026,10 @@ export default function App() {
                 <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-amber-200 leading-relaxed space-y-1">
                   <div className="font-bold text-amber-300 flex items-center gap-1.5">
                     <AlertTriangle className="w-4 h-4 text-amber-400" />
-                    <span>Автоматическое восстановление JSON структуры не удалось</span>
+                    <span>Отчёт пришёл с ошибкой формата</span>
                   </div>
                   <p className="text-[11px] text-indigo-200">
-                    Модель GigaChat вернула ответ, содержащий синтаксические повреждения или отказ безопасности, который встроенный парсер не смог привести к валидной схеме.
+                    Во время разбора ответа возникла ошибка формата или сработало ограничение безопасности. Нажмите «Повторить проверку», чтобы отправить запись заново.
                   </p>
                 </div>
               )}
@@ -3128,7 +3038,7 @@ export default function App() {
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] font-mono text-indigo-300">
-                      Оригинальный сырой текст ответа модели:
+                      Технический текст ответа:
                     </span>
                     <button
                       onClick={() => {
@@ -3146,7 +3056,7 @@ export default function App() {
                       ) : (
                         <>
                           <FileText className="w-3.5 h-3.5" />
-                          <span>Скопировать сырой ответ</span>
+                          <span>Скопировать текст</span>
                         </>
                       )}
                     </button>
@@ -3208,7 +3118,7 @@ export default function App() {
                   {selectedKtalkRecording ? 'Отправка выбранной встречи КТалк' : 'Ручная отправка встречи КТалк'}
                 </div>
                 <h3 className="text-lg font-black text-white mt-0.5">
-                  {selectedKtalkRecording?.title || 'Окно запуска методической проверки'}
+                  {selectedKtalkRecording?.title || 'Отправка занятия на проверку'}
                 </h3>
               </div>
               <button
@@ -3227,7 +3137,7 @@ export default function App() {
                 <div className="bg-[#14102C] border border-[#38BDF8]/40 rounded-2xl p-4 space-y-3">
                   <div className="flex items-center justify-between gap-2 border-b border-indigo-900/50 pb-2">
                     <span className="text-[11px] font-bold uppercase tracking-wider text-[#38BDF8]">
-                      Метаданные встречи из Контур.Толк
+                      Данные встречи из Контур.Толка
                     </span>
                     <a
                       href={selectedKtalkRecording.lectureUrl}
@@ -3320,7 +3230,7 @@ export default function App() {
                           <span className="text-indigo-200">{duplicateErrorTask.subject}</span>
                         </div>
                         <div>
-                          <span className="text-indigo-400">Оценка ИИ: </span>
+                          <span className="text-indigo-400">Оценка: </span>
                           <strong className="text-emerald-400 font-mono">
                             {typeof duplicateErrorTask.totalScore === 'number'
                               ? `${duplicateErrorTask.totalScore} / 100`
@@ -3363,10 +3273,10 @@ export default function App() {
                 <div className="p-5 bg-emerald-500/10 border border-emerald-500/30 rounded-2xl space-y-4">
                   <div className="flex items-center gap-2 text-emerald-300 font-bold text-sm">
                     <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                    <span>Заявка #{submitSuccessTask.id} поставлена в очередь!</span>
+                    <span>Занятие поставлено в очередь!</span>
                   </div>
                   <p className="text-xs text-indigo-200 leading-relaxed">
-                    {submitSuccessMessage || 'Анализ поставлен в очередь FIFO и будет выполнен последовательно. Встреча убрана из списка непроверенных.'}
+                    {submitSuccessMessage || 'Проверка поставлена в очередь и будет выполнена по порядку. Встреча убрана из списка непроверенных.'}
                   </p>
                   <div className="flex flex-wrap items-center gap-3 pt-1">
                     <button
@@ -3513,7 +3423,7 @@ export default function App() {
                       ) : (
                         <Play className="w-4 h-4 fill-white" />
                       )}
-                      <span>Запустить автоматический аудит ИИ</span>
+                      <span>Отправить на проверку</span>
                     </button>
                   </div>
                 </form>

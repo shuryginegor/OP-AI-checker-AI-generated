@@ -217,8 +217,14 @@ docker compose logs -f app
   git pull
   docker compose up -d --build
   ```
-* **Резервная копия базы данных:**
+* **Автоматические ежесуточные бэкапы в Docker:**
+  Отдельный контейнер `postgres_backup` раз в сутки (каждые 24 часа) автоматически снимает дамп PostgreSQL (`pg_dump`), проверяет целостность архива (`gzip -t`) и сохраняет его в папку `/opt/olymp_portal/backups/` (хранятся последние 14 дней, актуальная копия — `backups/latest_postgres.sql.gz`). Параллельно приложение раз в сутки сохраняет полный сжатый JSON-снимок в `data/backups/`.
+* **Восстановление базы из бэкапа:**
+  ```bash
+  gunzip -c backups/latest_postgres.sql.gz | docker compose exec -T postgres psql -U postgres -d lecture_db
+  ```
+* **Ручная резервная копия базы данных:**
   ```bash
   docker compose exec -t postgres pg_dump -U postgres lecture_db > backup_$(date +%Y%m%d).sql
   ```
-* **Все данные (кураторы, задачи, тексты промптов)** сохраняются на хосте в папке `/opt/olymp_portal/data` и в томе `postgres_data`, поэтому они **никогда не стираются** при перезапусках контейнеров.
+* **Все данные (кураторы, задачи, тексты правил)** сохраняются на хосте в папке `/opt/olymp_portal/data`, бэкапах `/opt/olymp_portal/backups` и в томе `postgres_data`, поэтому они **никогда не стираются** при перезапусках контейнеров.

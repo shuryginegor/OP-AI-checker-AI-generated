@@ -45,6 +45,7 @@ import {
   DEFAULT_AI_SETTINGS,
   AISettings,
   createLectureTasksBackup,
+  createDailyFullBackup,
   hydrateLectureTasksFromBackup,
   purgeDatabaseToCleanState,
   getUnreviewedKtalkRecordings,
@@ -108,6 +109,12 @@ async function startServer() {
     setInterval(() => {
       createLectureTasksBackup().catch(err => console.error("[Авто-Бэкап] Ошибка создания ежечасной копии:", err));
     }, 60 * 60 * 1000);
+
+    // Полный сжатый снимок БД (кураторы, лекции, правила, настройки, записи КТалк, аудит) раз в сутки
+    await createDailyFullBackup();
+    setInterval(() => {
+      createDailyFullBackup().catch(err => console.error("[Ежесуточный бэкап] Ошибка планировщика:", err));
+    }, 24 * 60 * 60 * 1000);
 
     // Гарантируем наличие criteria_active.json и prompt_active.txt на диске для Python-пайплайна
     const dataDir = process.env.APP_DATA_DIR ? path.resolve(process.env.APP_DATA_DIR) : path.join(process.cwd(), "data");
@@ -770,10 +777,11 @@ async function startServer() {
     res.json({ success: true, message: "Встреча возвращена в список непроверенных." });
   });
 
-  // Список всех проверок из БД с актуальной позицией в FIFO-очереди
+  // Список всех проверок из БД с актуальной позицией в очереди (1-я ожидающая = #1)
   app.get("/api/tasks", requireAuth, async (req, res) => {
     const currentUser: CuratorRecord = (req as any).user;
     const tasks = await getLectureTasks();
+
     const pendingSorted = tasks
       .filter(t => t.status === "pending")
       .sort((a, b) => {
@@ -889,18 +897,18 @@ async function startServer() {
       currentUser.role,
       "KTALK_TASK_QUEUED",
       taskId,
-      `Встреча поставлена в очередь FIFO (#${queuePosition}): ${cleanTeacher} | ${cleanSubject} | URL: ${cleanUrl}`,
+      `Встреча поставлена в очередь (#${queuePosition}): ${cleanTeacher} | ${cleanSubject} | URL: ${cleanUrl}`,
       ip
     );
 
-    // Пробуждаем FIFO-диспетчер очереди (строго 1 задача за раз)
+    // Пробуждаем диспетчер очереди (строго 1 задача за раз)
     void processLectureQueue();
 
     res.json({
       success: true,
       message: startsImmediately
-        ? "Заявка зарегистрирована. Сервер немедленно приступил к обработке через GigaChat."
-        : `Заявка добавлена в очередь на проверку (позиция #${queuePosition}). Обработка начнется сразу после завершения текущей лекции.`,
+        ? "Заявка зарегистрирована. Проверка занятия уже запущена."
+        : `Заявка добавлена в очередь на проверку (#${queuePosition}). Проверка начнётся сразу после завершения текущей лекции.`,
       queuePosition,
       task: { ...newTask, queuePosition }
     });
@@ -1235,7 +1243,7 @@ async function startServer() {
     res.json({ success: true, task: sanitizeTaskForCuratorRole(payloadTask, currentUser?.role) });
   });
 
-  // Повторная постановка лекции (включая уже проверенную, сбойную или поврежденную) в очередь FIFO
+  // Повторная постановка лекции (включая уже проверенную, сбойную или поврежденную) в очередь
   app.post("/api/tasks/:id/retry", requireAuth, async (req, res) => {
     const ip = getClientIp(req);
     const currentUser: CuratorRecord = (req as any).user;
@@ -1268,7 +1276,7 @@ async function startServer() {
       currentUser.role,
       "KTALK_TASK_RETRIED",
       task.id,
-      `Запущена повторная проверка встречи (${task.teacherName}, позиция в очереди #${queuePosition})`,
+      `Запущена повторная проверка встречи (${task.teacherName}, в очереди #${queuePosition})`,
       ip
     );
 
@@ -1276,7 +1284,7 @@ async function startServer() {
 
     res.json({
       success: true,
-      message: `Лекция возвращена в очередь FIFO на повторную проверку (позиция #${queuePosition}).`,
+      message: `Лекция возвращена в очередь на повторную проверку (#${queuePosition}).`,
       queuePosition,
       task: sanitizeTaskForCuratorRole({ ...requeued, queuePosition }, currentUser.role)
     });
@@ -1477,13 +1485,13 @@ async function startServer() {
     const action = req.body.action || "save_active";
 
     const actionTitles: Record<string, string> = {
-      save_active: "Сохранение рабочего системного промпта нейросети",
-      save_base: "Фиксация нового базового эталона промпта",
-      reset_to_base: "Сброс рабочего промпта к сохраненному базовому эталону",
-      reset_to_factory: "Сброс рабочего промпта к заводскому промпту разработчика",
+      save_active: "Сохранение рабочей инструкции проверки занятий",
+      save_base: "Сохранение базовой версии правил проверки",
+      reset_to_base: "Возврат инструкции к базовому варианту",
+      reset_to_factory: "Сброс инструкции к настройкам по умолчанию",
       save_report_settings: "Обновление настроек отображения оценок и неприменимых критериев (Н/П) в отчетах"
     };
-    const actionDesc = actionTitles[action] || "Изменение системного промпта ИИ";
+    const actionDesc = actionTitles[action] || "Обновление правил проверки занятий";
 
     const code = crypto.randomInt(100000, 1000000).toString();
     const expiresAt = Date.now() + 5 * 60 * 1000;
@@ -1564,10 +1572,10 @@ async function startServer() {
     const successMsg = action === "save_report_settings"
       ? "Настройки отображения критериев и Н/П в отчётах успешно обновлены!"
       : action === "reset_to_base"
-      ? "Рабочий промпт успешно сброшен к сохранённому базовому эталону."
+      ? "Рабочая инструкция успешно возвращена к базовому варианту."
       : action === "reset_to_factory"
-      ? "Рабочий промпт успешно сброшен к заводской версии."
-      : "Системный промпт нейросети успешно обновлен старшим куратором и зафиксирован в БД!";
+      ? "Рабочая инструкция успешно сброшена к настройкам по умолчанию."
+      : "Правила проверки занятий успешно обновлены и сохранены!";
 
     await logAuditEvent(
       user.email,

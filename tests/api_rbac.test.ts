@@ -249,12 +249,56 @@ describe('API, SQLite БД, RBAC, ротация/лимиты ИИ и экспо
     assert.equal(seniorTask.framesUploaded, 22);
     assert.equal(seniorTask.modelAttempts?.length, 2);
 
+    // Проверяем, что дашборд общий для всех кураторов (обычный куратор видит лекции, запущенные другими кураторами)
+    const db2 = new DatabaseSync(path.join(tempDataDir, 'app_database.sqlite'));
+    try {
+      db2.prepare(`
+        INSERT INTO lecture_tasks (
+          id, lecture_url, teacher_name, subject, group_name, date, status, progress_pct, curator_email, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'lec_api_other_active',
+        'https://olymp.ktalk.ru/recordings/other_active',
+        'Другой Спикер',
+        'Математика',
+        '10 класс',
+        '2026-11-15 18:10',
+        'analyzing',
+        85,
+        'other.curator@olympiadpractices.ru',
+        new Date().toISOString()
+      );
+      db2.prepare(`
+        INSERT INTO lecture_tasks (
+          id, lecture_url, teacher_name, subject, group_name, date, status, progress_pct, curator_email, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'lec_api_other_queued',
+        'https://olymp.ktalk.ru/recordings/other_queued',
+        'Ожидающий Спикер',
+        'Биология',
+        '9 класс',
+        '2026-11-15 18:15',
+        'pending',
+        0,
+        'other.curator@olympiadpractices.ru',
+        new Date().toISOString()
+      );
+    } finally {
+      db2.close();
+    }
+
     const curatorTasksRes = await fetch(`${baseUrl}/api/tasks`, {
       headers: { Authorization: `Bearer ${curatorToken}` }
     });
     const curatorTasksJson: any = await curatorTasksRes.json();
     const curatorTask = curatorTasksJson.tasks.find((t: any) => t.id === 'lec_api_completed_1');
+    const otherActiveTask = curatorTasksJson.tasks.find((t: any) => t.id === 'lec_api_other_active');
+    const otherQueuedTask = curatorTasksJson.tasks.find((t: any) => t.id === 'lec_api_other_queued');
     assert.ok(curatorTask);
+    assert.ok(otherActiveTask, 'Обычный куратор должен видеть лекции других кураторов на общем дашборде');
+    assert.ok(otherQueuedTask, 'Обычный куратор должен видеть ожидающие лекции других кураторов');
+    assert.equal(otherQueuedTask.queuePosition, 1, 'Первая ожидающая лекция должна отображаться как #1 в очереди');
     assert.equal(curatorTask.aiModel, 'GigaChat-2-Max');
     assert.equal(curatorTask.totalScore, 92);
     assert.equal(curatorTask.tokenUsage, undefined);
@@ -265,6 +309,13 @@ describe('API, SQLite БД, RBAC, ротация/лимиты ИИ и экспо
   });
 
   it('4. Валидация PUT /api/ai/settings, сохранение на диск и статистика моделей', async () => {
+    const initRes = await fetch(`${baseUrl}/api/ai/settings`, {
+      headers: { Authorization: `Bearer ${seniorToken}` }
+    });
+    assert.equal(initRes.status, 200);
+    const initJson: any = await initRes.json();
+    assert.equal(initJson.settings.maxRequestTokens, 100000);
+
     const badRes = await fetch(`${baseUrl}/api/ai/settings`, {
       method: 'PUT',
       headers: {

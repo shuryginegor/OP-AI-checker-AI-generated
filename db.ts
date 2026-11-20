@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import path from 'path';
 import fs from 'fs';
+import zlib from 'zlib';
 
 export interface CuratorRecord {
   id: string;
@@ -107,7 +108,7 @@ export interface AISettings {
 }
 
 export const DEFAULT_AI_SETTINGS: AISettings = {
-  maxRequestTokens: 128000,
+  maxRequestTokens: 100000,
   reservedOutputTokens: 8192,
   enableModelRotation: true
 };
@@ -2053,6 +2054,157 @@ export async function createLectureTasksBackup(): Promise<number> {
   } catch (err) {
     console.error('[БД Бэкап] Ошибка создания бэкапа проверок лекций:', err);
     return 0;
+  }
+}
+
+export interface DailyFullBackupResult {
+  snapshotPath: string | null;
+  sqliteBackupPath: string | null;
+  verified: boolean;
+  counts: {
+    curators: number;
+    lectureTasks: number;
+    teachers: number;
+    ktalkRecordings: number;
+    auditLogs: number;
+  };
+}
+
+export async function createDailyFullBackup(
+  customBackupDir?: string,
+  retentionDays = 14
+): Promise<DailyFullBackupResult> {
+  const backupDir = customBackupDir ? path.resolve(customBackupDir) : path.join(DATA_DIR, 'backups');
+  if (!fs.existsSync(backupDir)) {
+    fs.mkdirSync(backupDir, { recursive: true });
+  }
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const snapshotPath = path.join(backupDir, `daily_snapshot_${todayStr}.json.gz`);
+  const tmpSnapshotPath = path.join(backupDir, `.daily_snapshot_${todayStr}.json.gz.tmp`);
+  let sqliteBackupPath: string | null = null;
+
+  try {
+    const [
+      curators,
+      lectureTasks,
+      teachers,
+      ktalkRecordings,
+      auditLogs,
+      promptActive,
+      promptBase,
+      criteriaActive,
+      criteriaBase,
+      reportSettings,
+      aiSettings
+    ] = await Promise.all([
+      getCurators(),
+      getLectureTasks(),
+      getTeachersFromDB(),
+      getAllKtalkRecordings(),
+      getAuditLogs(2000),
+      getPromptConfigFromDB('active'),
+      getPromptConfigFromDB('base'),
+      getCriteriaConfigFromDB('active'),
+      getCriteriaConfigFromDB('base'),
+      getCriteriaConfigFromDB('report_settings'),
+      getCriteriaConfigFromDB('ai_settings')
+    ]);
+
+    const payload = {
+      version: 1,
+      date: todayStr,
+      createdAt: new Date().toISOString(),
+      dbType: sqliteDb ? 'sqlite' : 'postgres',
+      curators,
+      lectureTasks,
+      teachers,
+      ktalkRecordings,
+      auditLogs,
+      prompts: {
+        active: promptActive,
+        base: promptBase
+      },
+      criteriaConfigs: {
+        active: criteriaActive,
+        base: criteriaBase,
+        report_settings: reportSettings,
+        ai_settings: aiSettings
+      }
+    };
+
+    const compressed = zlib.gzipSync(Buffer.from(JSON.stringify(payload, null, 2), 'utf-8'));
+    fs.writeFileSync(tmpSnapshotPath, compressed);
+
+    // Проверка целостности сжатого архива перед публикацией
+    const verifiedRaw = zlib.gunzipSync(fs.readFileSync(tmpSnapshotPath)).toString('utf-8');
+    const verifiedParsed = JSON.parse(verifiedRaw);
+    if (!verifiedParsed || !Array.isArray(verifiedParsed.lectureTasks) || !Array.isArray(verifiedParsed.curators)) {
+      throw new Error('Нарушена структура ежедневного снимка при проверке целостности');
+    }
+
+    fs.renameSync(tmpSnapshotPath, snapshotPath);
+
+    // Дополнительно сохраняем консистентную копию SQLite-файла, если используется SQLite
+    if (sqliteDb && fs.existsSync(SQLITE_FILE)) {
+      try {
+        sqliteDb.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+        const sqliteOut = path.join(backupDir, `app_database_${todayStr}.sqlite.gz`);
+        const sqliteTmp = path.join(backupDir, `.app_database_${todayStr}.sqlite.gz.tmp`);
+        const sqliteBytes = fs.readFileSync(SQLITE_FILE);
+        const gzSqlite = zlib.gzipSync(sqliteBytes);
+        fs.writeFileSync(sqliteTmp, gzSqlite);
+        const checkBytes = zlib.gunzipSync(fs.readFileSync(sqliteTmp));
+        if (checkBytes.length !== sqliteBytes.length) {
+          throw new Error('Несовпадение размера при проверке gzip-копии SQLite');
+        }
+        fs.renameSync(sqliteTmp, sqliteOut);
+        sqliteBackupPath = sqliteOut;
+      } catch (sqliteErr) {
+        console.warn('[Ежесуточный бэкап] Не удалось сохранить копию SQLite-файла:', sqliteErr);
+      }
+    }
+
+    // Ротация: удаляем архивы старше retentionDays дней
+    const cutoffMs = Date.now() - Math.max(1, retentionDays) * 24 * 60 * 60 * 1000;
+    for (const entry of fs.readdirSync(backupDir)) {
+      const m = entry.match(/^(?:daily_snapshot_|app_database_)(\d{4}-\d{2}-\d{2})\.(?:json|sqlite)\.gz$/);
+      if (!m) continue;
+      const fullPath = path.join(backupDir, entry);
+      const fileDateMs = Date.parse(`${m[1]}T00:00:00Z`);
+      const st = fs.statSync(fullPath);
+      if ((Number.isFinite(fileDateMs) && fileDateMs < cutoffMs) || st.mtimeMs < cutoffMs) {
+        fs.unlinkSync(fullPath);
+      }
+    }
+
+    console.log(
+      `[Ежесуточный бэкап] ✅ Снимок БД создан и проверен (${todayStr}): лекции=${lectureTasks.length}, кураторы=${curators.length}, записи КТалк=${ktalkRecordings.length}`
+    );
+
+    return {
+      snapshotPath,
+      sqliteBackupPath,
+      verified: true,
+      counts: {
+        curators: curators.length,
+        lectureTasks: lectureTasks.length,
+        teachers: teachers.length,
+        ktalkRecordings: ktalkRecordings.length,
+        auditLogs: auditLogs.length
+      }
+    };
+  } catch (err) {
+    if (fs.existsSync(tmpSnapshotPath)) {
+      try { fs.unlinkSync(tmpSnapshotPath); } catch {}
+    }
+    console.error('[Ежесуточный бэкап] ❌ Ошибка создания ежесуточного снимка:', err);
+    return {
+      snapshotPath: null,
+      sqliteBackupPath: null,
+      verified: false,
+      counts: { curators: 0, lectureTasks: 0, teachers: 0, ktalkRecordings: 0, auditLogs: 0 }
+    };
   }
 }
 

@@ -62,7 +62,7 @@ interface AILimitsPanelProps {
   onSettingsSaved?: () => void;
 }
 
-const PRESET_LIMITS = [48000, 64000, 96000, 128000, 160000, 192000, 256000];
+const PRESET_LIMITS = [48000, 64000, 96000, 100000, 128000, 160000, 192000, 256000];
 
 const MODEL_META: Record<
   string,
@@ -135,11 +135,11 @@ export const AILimitsPanel: React.FC<AILimitsPanelProps> = ({
   onSettingsSaved
 }) => {
   const [settings, setSettings] = useState<AISettingsData>({
-    maxRequestTokens: 128000,
+    maxRequestTokens: 100000,
     reservedOutputTokens: 8192,
     enableModelRotation: true
   });
-  const [draftMaxTokens, setDraftMaxTokens] = useState<number>(128000);
+  const [draftMaxTokens, setDraftMaxTokens] = useState<number>(100000);
   const [draftRotation, setDraftRotation] = useState<boolean>(true);
   const [modelChain, setModelChain] = useState<string[]>([
     'GigaChat-2-Pro',
@@ -225,7 +225,7 @@ export const AILimitsPanel: React.FC<AILimitsPanelProps> = ({
     setErrorMsg('');
     setSaveNotice('');
 
-    const clamped = Math.max(32000, Math.min(256000, Math.round(Number(draftMaxTokens) || 128000)));
+    const clamped = Math.max(32000, Math.min(256000, Math.round(Number(draftMaxTokens) || 100000)));
     setDraftMaxTokens(clamped);
 
     try {
@@ -311,10 +311,10 @@ export const AILimitsPanel: React.FC<AILimitsPanelProps> = ({
               <span className="text-[#38BDF8]">Тариф Freemium (без предоплаты)</span>
             </div>
             <h2 className="text-xl font-black text-white">
-              Лимиты токенов, ротация моделей и расход по лекциям
+              Лимиты токенов, модели и расход по занятиям
             </h2>
             <p className="text-xs text-indigo-200/80 max-w-3xl leading-relaxed">
-              Настройка расчётного бюджета токенов на одну проверку, приоритет обхода моделей Sber GigaChat (Pro → Max → Ultra → Base) и прозрачный учёт фактических затрат по каждому занятию.
+              Настройка расчётного бюджета токенов на одну проверку, порядок резервных моделей (Pro → Max → Ultra → Base) и учёт фактического расхода по каждому занятию.
             </p>
           </div>
 
@@ -399,10 +399,10 @@ export const AILimitsPanel: React.FC<AILimitsPanelProps> = ({
           <div>
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
               <Sliders className="w-4 h-4 text-[#FF5252]" />
-              <span>1. Динамический расчётный лимит токенов на один запрос</span>
+              <span>1. Расчётный лимит токенов на одно занятие</span>
             </h3>
             <p className="text-xs text-indigo-200/80 mt-1">
-              Лимит можно как снижать (экономия квоты), так и повышать до 256 000 токенов (больше кадров и полный транскрипт).
+              Лимит можно как снижать (экономия квоты), так и повышать до 256 000 токенов (больше кадров и полный текст речи).
             </p>
           </div>
 
@@ -499,7 +499,7 @@ export const AILimitsPanel: React.FC<AILimitsPanelProps> = ({
           {/* Правая часть: схема приоритета распределения бюджета */}
           <div className="lg:col-span-5 space-y-4 lg:border-l lg:border-indigo-900/50 lg:pl-6">
             <div className="text-xs font-bold text-white">
-              Порядок укладки материалов в {formatNum(draftMaxTokens)} токенов
+              Как распределяются {formatNum(draftMaxTokens)} токенов на занятие
             </div>
 
             {/* Полоса пропорций */}
@@ -512,7 +512,7 @@ export const AILimitsPanel: React.FC<AILimitsPanelProps> = ({
               <div
                 style={{ width: `${pctTranscript}%` }}
                 className="bg-[#38BDF8] h-full"
-                title={`Транскрипт (ориентир до ~${formatNum(estTranscriptBudget)} ток.)`}
+                title={`Текст речи (ориентир до ~${formatNum(estTranscriptBudget)} ток.)`}
               />
               <div
                 style={{ width: `${pctFrames}%` }}
@@ -522,7 +522,7 @@ export const AILimitsPanel: React.FC<AILimitsPanelProps> = ({
               <div
                 style={{ width: `${pctOutput}%` }}
                 className="bg-[#FF5252] h-full"
-                title={`Резерв ответа: ${formatNum(reservedOut)} ток.`}
+                title={`Запас на ответ: ${formatNum(reservedOut)} ток.`}
               />
             </div>
 
@@ -530,25 +530,25 @@ export const AILimitsPanel: React.FC<AILimitsPanelProps> = ({
               <li className="flex items-start gap-2">
                 <span className="font-mono font-bold text-emerald-400 shrink-0">01.</span>
                 <span>
-                  <strong className="text-white">Аудиозапись (100% неприкосновенна)</strong> — всегда отправляется целиком (~25–30 тыс. токенов за 80 мин), не обрезается ни при каком лимите.
+                  <strong className="text-white">Аудиозапись (передаётся всегда целиком)</strong> — не обрезается ни при каком лимите (~25–30 тыс. токенов за 80 мин).
                 </span>
               </li>
               <li className="flex items-start gap-2">
                 <span className="font-mono font-bold text-[#38BDF8] shrink-0">02.</span>
                 <span>
-                  <strong className="text-white">Текстовый транскрипт (режется первым)</strong> — если запрос не влезает в бюджет, сначала сжимается транскрипт с сохранением начала, середины и финала с таймкодами.
+                  <strong className="text-white">Текст речи (сокращается первым)</strong> — если материалы не умещаются в лимит, сначала сжимается текст с сохранением начала, середины и конца.
                 </span>
               </li>
               <li className="flex items-start gap-2">
                 <span className="font-mono font-bold text-amber-300 shrink-0">03.</span>
                 <span>
-                  <strong className="text-white">Видеокадры (режутся/расширяются вторыми)</strong> — целевой потолок сейчас до <span className="font-mono tabular-nums text-white">{scaledFramesCap} кадров</span>; при нехватке места после сжатия транскрипта число кадров снижается вплоть до минимума 3.
+                  <strong className="text-white">Кадры с экрана (подстраиваются вторыми)</strong> — целевое число сейчас до <span className="font-mono tabular-nums text-white">{scaledFramesCap} кадров</span>; при нехватке места снижается до 3.
                 </span>
               </li>
               <li className="flex items-start gap-2">
                 <span className="font-mono font-bold text-[#FF5252] shrink-0">04.</span>
                 <span>
-                  <strong className="text-white">Резерв ответа ({formatNum(reservedOut)} токенов)</strong> — выделяется на генерацию полного JSON-отчёта.
+                  <strong className="text-white">Запас на текст отчёта ({formatNum(reservedOut)} токенов)</strong> — выделяется, чтобы отчёт сформировался полностью без обрыва.
                 </span>
               </li>
             </ol>
@@ -633,7 +633,7 @@ export const AILimitsPanel: React.FC<AILimitsPanelProps> = ({
             <thead className="bg-[#14102C] text-indigo-300 uppercase text-[10px] tracking-wider border-b border-indigo-900/40">
               <tr>
                 <th className="px-4 py-3">Порядок</th>
-                <th className="px-4 py-3">Модель ИИ</th>
+                <th className="px-4 py-3">Модель</th>
                 <th className="px-4 py-3">Доступ в API</th>
                 <th className="px-4 py-3 text-right">Остаток (Сбер API)</th>
                 <th className="px-4 py-3 text-right">Проверок</th>
@@ -738,10 +738,10 @@ export const AILimitsPanel: React.FC<AILimitsPanelProps> = ({
               <tr>
                 <th className="px-5 py-3">Дата</th>
                 <th className="px-5 py-3">Преподаватель и предмет</th>
-                <th className="px-5 py-3">Итоговая модель ИИ</th>
+                <th className="px-5 py-3">Модель проверки</th>
                 <th className="px-5 py-3 text-right">Токены (вход / ответ / всего)</th>
-                <th className="px-5 py-3 text-right">Кадры в запросе</th>
-                <th className="px-5 py-3">Транскрипт</th>
+                <th className="px-5 py-3 text-right">Кадры</th>
+                <th className="px-5 py-3">Текст речи</th>
                 <th className="px-5 py-3 text-right">Балл</th>
               </tr>
             </thead>
