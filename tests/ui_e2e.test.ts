@@ -159,6 +159,7 @@ describe('E2E UI тесты в Headless Chromium (Playwright)', () => {
         ...process.env,
         PORT: String(port),
         NODE_ENV: hasDist ? 'production' : 'development',
+        DISABLE_HMR: 'true',
         DB_TYPE: 'sqlite',
         APP_DATA_DIR: tempDataDir,
         TESTING_MODE: 'false',
