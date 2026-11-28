@@ -165,12 +165,6 @@ async function startServer() {
       createLectureTasksBackup().catch(err => console.error("[Авто-Бэкап] Ошибка создания ежечасной копии:", err));
     }, 60 * 60 * 1000);
 
-    // Полный сжатый снимок БД (кураторы, лекции, правила, настройки, записи КТалк, аудит) раз в сутки
-    await createDailyFullBackup();
-    setInterval(() => {
-      createDailyFullBackup().catch(err => console.error("[Ежесуточный бэкап] Ошибка планировщика:", err));
-    }, 24 * 60 * 60 * 1000);
-
     // Гарантируем наличие criteria_active.json и prompt_active.txt на диске для Python-пайплайна
     const dataDir = process.env.APP_DATA_DIR ? path.resolve(process.env.APP_DATA_DIR) : path.join(process.cwd(), "data");
     if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
@@ -241,6 +235,12 @@ async function startServer() {
     console.log(
       `[Инициализация] Настройки ИИ синхронизированы: лимит=${initAiSettings.maxRequestTokens} ток., резерв ответа=${initAiSettings.reservedOutputTokens} ток., ротация=${initAiSettings.enableModelRotation ? "вкл" : "выкл"}.`
     );
+
+    // Полный сжатый снимок БД создаём уже после миграции промпта, чтобы в свежий бэкап сразу попал актуальный шаблон
+    await createDailyFullBackup();
+    setInterval(() => {
+      createDailyFullBackup().catch(err => console.error("[Ежесуточный бэкап] Ошибка планировщика:", err));
+    }, 24 * 60 * 60 * 1000);
   } catch (dbErr) {
     console.error("[Инициализация] Критическая ошибка БД:", dbErr);
   }
