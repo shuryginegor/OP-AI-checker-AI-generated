@@ -134,9 +134,10 @@ class TestPythonPipeline(unittest.TestCase):
     def test_budget_planner_long_calibrated_prompt_fits_default_100k_window(self):
         built_prompt, _ = ktalk_gigachat_pipeline.build_system_prompt("Групповой разбор олимпиадных задач, 9 класс")
         self.assertIn("80–92%", built_prompt)
-        self.assertIn("СНАЧАЛА ФАКТЫ", built_prompt)
+        self.assertIn("ФАКТЫ И НЕДОЧЁТ", built_prompt)
+        self.assertIn("НУЛЕВАЯ ВЕЖЛИВОСТЬ", built_prompt)
 
-        # Проверка порядка полей «сначала факты -> потом score»
+        # Проверка порядка полей «сначала факты и недочёт -> потом score»
         custom_prompt_path = os.path.join(self.tmp_dir, "prompt_active.txt")
         with open(custom_prompt_path, "w", encoding="utf-8") as f:
             f.write("Оцени занятие честно.")
@@ -144,14 +145,18 @@ class TestPythonPipeline(unittest.TestCase):
         os.remove(custom_prompt_path)
 
         q_pos = schema_prompt.find('"quote":')
+        g_pos = schema_prompt.find('"gap":')
         d_pos = schema_prompt.find('"details":')
         s_pos = schema_prompt.find('"score":')
         self.assertNotEqual(q_pos, -1)
+        self.assertNotEqual(g_pos, -1)
         self.assertLess(q_pos, s_pos)
+        self.assertLess(g_pos, s_pos)
         self.assertLess(d_pos, s_pos)
 
         common_instr = ai_common.get_json_output_prompt_instructions()
         self.assertLess(common_instr.find('"quote":'), common_instr.find('"score":'))
+        self.assertLess(common_instr.find('"gap":'), common_instr.find('"score":'))
         self.assertLess(common_instr.find('"details":'), common_instr.find('"score":'))
 
         dummy_audio = os.path.join(self.tmp_dir, "lesson_25mb.mp3")

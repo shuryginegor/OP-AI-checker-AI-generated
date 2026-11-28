@@ -501,8 +501,8 @@ describe('API, SQLite БД, RBAC, ротация/лимиты ИИ и экспо
         headers: { Authorization: `Bearer ${loginUp.token}` }
       });
       const afterMigJson: any = await afterMigRes.json();
-      assert.ok(afterMigJson.active.includes('СНАЧАЛА ФАКТЫ'), 'Миграция должна заменить старый active');
-      assert.ok(afterMigJson.base.includes('СНАЧАЛА ФАКТЫ'), 'Миграция должна заменить старый base');
+      assert.ok(afterMigJson.active.includes('ФАКТЫ И НЕДОЧЁТ'), 'Миграция должна заменить старый active');
+      assert.ok(afterMigJson.base.includes('ФАКТЫ И НЕДОЧЁТ'), 'Миграция должна заменить старый base');
       assert.ok(fs.readFileSync(path.join(upgradeDir, 'prompt_active.txt'), 'utf-8').includes('80–92%'));
       assert.ok(fs.readFileSync(path.join(upgradeDir, 'prompt_base.txt'), 'utf-8').includes('80–92%'));
 
