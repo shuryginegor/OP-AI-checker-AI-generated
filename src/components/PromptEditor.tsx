@@ -254,7 +254,7 @@ export const PromptEditor: React.FC<PromptEditorProps> = ({
               <Shield className="w-3 h-3 text-amber-400" />
               Только для старших кураторов
             </span>
-            <span className="text-xs text-indigo-200/80">Настройка стандарта оценки занятий</span>
+            <span className="text-xs text-indigo-200/80">Калибровка 80–92 · Детерминированный режим (T=0.0)</span>
           </div>
           <h2 className="text-xl font-black text-white">
             Правила и инструкция проверки занятий

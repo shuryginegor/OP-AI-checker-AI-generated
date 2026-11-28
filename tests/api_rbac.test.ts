@@ -422,4 +422,135 @@ describe('API, SQLite БД, RBAC, ротация/лимиты ИИ и экспо
       await new Promise(r => setTimeout(r, 150));
     }
   });
+
+  it('6. Однократная миграция калиброванного промпта обновляет active и base и сохраняет будущие правки', async () => {
+    const promptRes = await fetch(`${baseUrl}/api/prompt/data`, {
+      headers: { Authorization: `Bearer ${seniorToken}` }
+    });
+    assert.equal(promptRes.status, 200);
+    const promptJson: any = await promptRes.json();
+    assert.ok(promptJson.active.includes('80–92%'), 'Активный шаблон должен содержать калибровку 80–92%');
+    assert.ok(promptJson.base.includes('80–92%'), 'Базовый шаблон должен содержать калибровку 80–92%');
+    assert.equal(promptJson.active, promptJson.factory);
+    assert.equal(promptJson.base, promptJson.factory);
+    assert.ok(
+      Array.isArray(promptJson.audit_logs) &&
+      promptJson.audit_logs.some((l: any) => l.action === 'PROMPT_CALIBRATION_APPLIED'),
+      'В журнале аудита должна быть запись PROMPT_CALIBRATION_APPLIED'
+    );
+
+    // Имитируем устаревший сервер (без prompt_calibration_version, со старыми active и base в БД и на диске)
+    const upgradeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'olymp_upgrade_test_'));
+    const upgradePort = await getFreePort();
+    const upgradeUrl = `http://127.0.0.1:${upgradePort}`;
+    const tsxBin = path.join(ROOT_DIR, 'node_modules', '.bin', 'tsx');
+
+    let upgradeProc: ChildProcess | null = null;
+    const stopUpgradeProc = async () => {
+      if (upgradeProc && !upgradeProc.killed) {
+        upgradeProc.kill('SIGTERM');
+        await new Promise<void>(resolve => {
+          const t = setTimeout(() => {
+            try { upgradeProc?.kill('SIGKILL'); } catch {}
+            resolve();
+          }, 3000);
+          upgradeProc!.once('exit', () => { clearTimeout(t); resolve(); });
+        });
+      }
+      upgradeProc = null;
+    };
+
+    try {
+      // Создаём старую БД со старыми шаблонами active/base без метки версии калибровки
+      const seedDb = new DatabaseSync(path.join(upgradeDir, 'app_database.sqlite'));
+      seedDb.exec(`
+        CREATE TABLE IF NOT EXISTS prompt_configs (
+          key TEXT PRIMARY KEY,
+          prompt_text TEXT NOT NULL,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          updated_by TEXT
+        );
+      `);
+      seedDb.prepare(`INSERT INTO prompt_configs (key, prompt_text, updated_by) VALUES (?, ?, ?)`).run('active', 'OLD_ACTIVE_PROMPT_TEXT', SENIOR_EMAIL);
+      seedDb.prepare(`INSERT INTO prompt_configs (key, prompt_text, updated_by) VALUES (?, ?, ?)`).run('base', 'OLD_BASE_PROMPT_TEXT', SENIOR_EMAIL);
+      seedDb.close();
+
+      fs.writeFileSync(path.join(upgradeDir, 'prompt_active.txt'), 'OLD_ACTIVE_PROMPT_TEXT', 'utf-8');
+      fs.writeFileSync(path.join(upgradeDir, 'prompt_base.txt'), 'OLD_BASE_PROMPT_TEXT', 'utf-8');
+
+      upgradeProc = spawn(tsxBin, ['server.ts'], {
+        cwd: ROOT_DIR,
+        env: {
+          ...process.env,
+          PORT: String(upgradePort),
+          NODE_ENV: 'production',
+          DB_TYPE: 'sqlite',
+          APP_DATA_DIR: upgradeDir,
+          TESTING_MODE: 'false',
+          TALK_API_KEY: '',
+          GIGACHAT_CREDENTIALS: '',
+          SMTP_HOST: '',
+          BOT_TOKEN: ''
+        },
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      await waitForServerReady(upgradeUrl);
+
+      const loginUp = await loginViaOtp(upgradeUrl, upgradeDir, SENIOR_EMAIL);
+      const afterMigRes = await fetch(`${upgradeUrl}/api/prompt/data`, {
+        headers: { Authorization: `Bearer ${loginUp.token}` }
+      });
+      const afterMigJson: any = await afterMigRes.json();
+      assert.ok(afterMigJson.active.includes('СНАЧАЛА ФАКТЫ'), 'Миграция должна заменить старый active');
+      assert.ok(afterMigJson.base.includes('СНАЧАЛА ФАКТЫ'), 'Миграция должна заменить старый base');
+      assert.ok(fs.readFileSync(path.join(upgradeDir, 'prompt_active.txt'), 'utf-8').includes('80–92%'));
+      assert.ok(fs.readFileSync(path.join(upgradeDir, 'prompt_base.txt'), 'utf-8').includes('80–92%'));
+
+      // Сохраняем кастомную правку старшего куратора после миграции и перезапускаем сервер — она должна сохраниться
+      const reqSave = await fetch(`${upgradeUrl}/api/prompt/request-save-code`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${loginUp.token}` },
+        body: JSON.stringify({ action: 'save_active' })
+      });
+      assert.equal(reqSave.status, 200);
+      const saveCode = readLatestOtpFromDb(upgradeDir, SENIOR_EMAIL, 'prompt_save');
+      const customPromptText = 'CUSTOM_SENIOR_CURATOR_PROMPT_V3';
+      const confSave = await fetch(`${upgradeUrl}/api/prompt/confirm-save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${loginUp.token}` },
+        body: JSON.stringify({ code: saveCode, action: 'save_active', prompt_text: customPromptText })
+      });
+      assert.equal(confSave.status, 200);
+
+      await stopUpgradeProc();
+
+      // Повторный запуск на той же БД — миграция НЕ затирает правку старшего куратора
+      upgradeProc = spawn(tsxBin, ['server.ts'], {
+        cwd: ROOT_DIR,
+        env: {
+          ...process.env,
+          PORT: String(upgradePort),
+          NODE_ENV: 'production',
+          DB_TYPE: 'sqlite',
+          APP_DATA_DIR: upgradeDir,
+          TESTING_MODE: 'false',
+          TALK_API_KEY: '',
+          GIGACHAT_CREDENTIALS: '',
+          SMTP_HOST: '',
+          BOT_TOKEN: ''
+        },
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      await waitForServerReady(upgradeUrl);
+
+      const afterRestartRes = await fetch(`${upgradeUrl}/api/prompt/data`, {
+        headers: { Authorization: `Bearer ${loginUp.token}` }
+      });
+      const afterRestartJson: any = await afterRestartRes.json();
+      assert.equal(afterRestartJson.active, customPromptText, 'Повторный рестарт должен сохранять правку старшего куратора');
+    } finally {
+      await stopUpgradeProc();
+      fs.rmSync(upgradeDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -308,8 +308,9 @@ describe('E2E UI тесты в Headless Chromium (Playwright)', () => {
     await assert.doesNotReject(() => fokinaRow.getByText(/18\/20 кадр\./).waitFor({ state: 'visible' }));
     await assert.doesNotReject(() => fokinaRow.getByRole('button', { name: /Перепроверить/i }).waitFor({ state: 'visible' }));
 
-    // 4. Открытие карточки отчёта, проверка модели, телеметрии и кнопки «Отправить на перепроверку»
+    // 4. Открытие карточки отчёта, проверка модели, статуса критического контроля, телеметрии и кнопки «Отправить на перепроверку»
     await fokinaRow.getByRole('button', { name: /Подробнее/i }).click();
+    await page.getByText(/Критический контроль пройден: критических нарушений не выявлено/i).waitFor({ state: 'visible' });
     await page.getByText(/Расход ресурсов на проверку/i).waitFor({ state: 'visible' });
     await page.getByText(/Модель:\s*GigaChat-2-Max/i).waitFor({ state: 'visible' });
     const modalRetryBtn = page.getByRole('button', { name: /Отправить на перепроверку/i });

@@ -2660,20 +2660,56 @@ export default function App() {
 
             {/* Контент модалки */}
             <div className="p-6 space-y-6 overflow-y-auto flex-1">
-              {/* Критические нарушения (если зафиксированы) */}
-              {Array.isArray(activeDetailTask.criticalViolations) && activeDetailTask.criticalViolations.length > 0 && (
-                <div className="p-4 bg-rose-500/15 border border-rose-500/50 rounded-2xl space-y-2">
-                  <div className="flex items-center gap-2 text-rose-300 font-bold text-xs uppercase tracking-wider">
-                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-                    <span>Зафиксированы критические нарушения ({activeDetailTask.criticalViolations.length})</span>
+              {/* Критический контроль (всегда показываем статус: зафиксированы нарушения с таймкодами или пройдено) */}
+              {Array.isArray(activeDetailTask.criticalViolations) && activeDetailTask.criticalViolations.length > 0 ? (
+                <div className="p-4 bg-rose-500/15 border border-rose-500/50 rounded-2xl space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 text-rose-300 font-bold text-xs uppercase tracking-wider">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                      <span>Зафиксированы критические нарушения ({activeDetailTask.criticalViolations.length})</span>
+                    </div>
+                    <span className="text-[10px] font-mono bg-rose-500/20 text-rose-200 border border-rose-500/40 px-2 py-0.5 rounded">
+                      Проверено: {dynamicCriticalCriteria.length} крит. пунктов
+                    </span>
                   </div>
-                  <ul className="space-y-1.5 text-xs text-rose-100">
-                    {activeDetailTask.criticalViolations.map((cv: string, idx: number) => (
-                      <li key={idx} className="p-2.5 bg-[#14102C]/80 rounded-xl border border-rose-500/30">
-                        {cv}
-                      </li>
-                    ))}
+                  <ul className="space-y-2 text-xs text-rose-100">
+                    {activeDetailTask.criticalViolations.map((cv: string, idx: number) => {
+                      const cvText = typeof cv === 'string' ? cv : JSON.stringify(cv);
+                      const cvTimecodes = Array.from(new Set(cvText.match(/\b(?:\d{1,2}:)?\d{2}:\d{2}\b/g) || []));
+                      return (
+                        <li key={idx} className="p-3 bg-[#14102C]/85 rounded-xl border border-rose-500/35 space-y-1.5">
+                          {cvTimecodes.length > 0 && (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {cvTimecodes.map((tc, tcIdx) => (
+                                <span
+                                  key={tcIdx}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-rose-500/25 text-rose-200 border border-rose-500/50"
+                                >
+                                  🕒 {tc}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          <div className="leading-relaxed">{cvText}</div>
+                        </li>
+                      );
+                    })}
                   </ul>
+                </div>
+              ) : (
+                <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/30 rounded-2xl flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5 text-xs">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <div>
+                      <span className="font-bold text-emerald-300">Критический контроль пройден: критических нарушений не выявлено</span>
+                      <div className="text-[11px] text-indigo-300/85 mt-0.5">
+                        Занятие проверено нейросетью по всем {dynamicCriticalCriteria.length} критическим критериям (оценка по стандартным критериям не искажается)
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-mono font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 px-2.5 py-1 rounded-lg">
+                    0 крит. нарушений
+                  </span>
                 </div>
               )}
 

@@ -131,6 +131,72 @@ class TestPythonPipeline(unittest.TestCase):
         self.assertEqual(expanded["maxFrames"], 50)
         self.assertGreater(expanded["configuredBudgetTokens"], tight["configuredBudgetTokens"])
 
+    def test_budget_planner_long_calibrated_prompt_fits_default_100k_window(self):
+        built_prompt, _ = ktalk_gigachat_pipeline.build_system_prompt("Групповой разбор олимпиадных задач, 9 класс")
+        self.assertIn("80–92%", built_prompt)
+        self.assertIn("СНАЧАЛА ФАКТЫ", built_prompt)
+
+        # Проверка порядка полей «сначала факты -> потом score»
+        custom_prompt_path = os.path.join(self.tmp_dir, "prompt_active.txt")
+        with open(custom_prompt_path, "w", encoding="utf-8") as f:
+            f.write("Оцени занятие честно.")
+        schema_prompt, _ = ktalk_gigachat_pipeline.build_system_prompt("")
+        os.remove(custom_prompt_path)
+
+        q_pos = schema_prompt.find('"quote":')
+        d_pos = schema_prompt.find('"details":')
+        s_pos = schema_prompt.find('"score":')
+        self.assertNotEqual(q_pos, -1)
+        self.assertLess(q_pos, s_pos)
+        self.assertLess(d_pos, s_pos)
+
+        common_instr = ai_common.get_json_output_prompt_instructions()
+        self.assertLess(common_instr.find('"quote":'), common_instr.find('"score":'))
+        self.assertLess(common_instr.find('"details":'), common_instr.find('"score":'))
+
+        dummy_audio = os.path.join(self.tmp_dir, "lesson_25mb.mp3")
+        with open(dummy_audio, "wb") as f:
+            f.write(b"0" * (25 * 1024 * 1024))  # 25 MB (~36 250 ток.)
+
+        long_transcript = "\n".join(
+            f"[00:{i % 60:02d}:00] Спикер: Подробное объяснение олимпиадной задачи номер {i} с доказательством."
+            for i in range(1, 700)
+        )
+        long_summary = "Саммари урока. " * 400
+        static_chars = len(built_prompt) + 1200  # system_prompt + user_text boilerplate
+
+        plan_100k = ai_gigachat.plan_multimodal_budget(
+            transcript_text=long_transcript,
+            summary_text=long_summary,
+            static_prompt_chars=static_chars,
+            audio_path=dummy_audio,
+            total_extracted_frames=40,
+            max_request_tokens=100_000,
+            reserved_output_tokens=8_192,
+        )
+        self.assertLessEqual(
+            plan_100k["estimatedInputTokens"] + plan_100k["reservedOutputTokens"],
+            plan_100k["configuredBudgetTokens"],
+        )
+
+        # Экстремально тесный бюджет с длинным промптом и 18 МБ аудио не должен вылетать за окно
+        dummy_audio_18 = os.path.join(self.tmp_dir, "lesson_18mb.mp3")
+        with open(dummy_audio_18, "wb") as f:
+            f.write(b"0" * (18 * 1024 * 1024))
+        stress = ai_gigachat.plan_multimodal_budget(
+            transcript_text=long_transcript,
+            summary_text=long_summary,
+            static_prompt_chars=10_500,
+            audio_path=dummy_audio_18,
+            total_extracted_frames=50,
+            max_request_tokens=48_000,
+            reserved_output_tokens=8_192,
+        )
+        self.assertLessEqual(
+            stress["estimatedInputTokens"] + stress["reservedOutputTokens"],
+            stress["configuredBudgetTokens"],
+        )
+
     def test_parse_analysis_json_with_broken_json_and_na_criteria(self):
         broken_wrapped = """```json
         {
@@ -250,7 +316,7 @@ class TestPythonPipeline(unittest.TestCase):
             if idx == 1:
                 valid_scores.append({"id": idx, "criterion": crit["text"], "score": None, "details": "Н/П для теста", "timecodes": []})
             elif idx == 2:
-                valid_scores.append({"id": idx, "criterion": crit["text"], "score": 1, "details": "Задержка на 00:04:12", "timecodes": []})
+                valid_scores.append({"id": idx, "criterion": crit["text"], "score": 1, "details": "Задержка на 00:04:12", "timecodes": [], "quote": "«Подождите, сейчас найду файл с задачей»"})
             else:
                 valid_scores.append({"id": idx, "criterion": crit["text"], "score": 0, "details": "Всё хорошо", "timecodes": []})
 
@@ -269,6 +335,7 @@ class TestPythonPipeline(unittest.TestCase):
         class FakeGigaChatClient:
             def __init__(self):
                 self.calls = []
+                self.temperatures = []
 
             async def aupload_file(self, file_tuple, purpose="general"):
                 name = file_tuple[0]
@@ -282,14 +349,15 @@ class TestPythonPipeline(unittest.TestCase):
 
             async def achat(self, chat_payload):
                 self.calls.append(chat_payload.model)
+                self.temperatures.append(chat_payload.temperature)
                 if chat_payload.model == "GigaChat-2-Pro":
                     raise Exception("HTTP 429 Too Many Requests")
                 if chat_payload.model == "GigaChat-2-Max":
                     return types.SimpleNamespace(
-                        usage=types.SimpleNamespace(prompt_tokens=14000, completion_tokens=8192, total_tokens=22192),
+                        usage=types.SimpleNamespace(prompt_tokens=14000, completion_tokens=300, total_tokens=14300),
                         choices=[types.SimpleNamespace(
-                            finish_reason="length",
-                            message=types.SimpleNamespace(content='{"criteria_scores": [{"id": 1, "score": 0, "details": "обрыв"}]}'),
+                            finish_reason="stop",
+                            message=types.SimpleNamespace(content='{"broken": "no criteria_scores"}'),
                         )],
                     )
                 if chat_payload.model == "GigaChat-3-Ultra":
@@ -338,6 +406,7 @@ class TestPythonPipeline(unittest.TestCase):
 
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["aiModel"], "GigaChat-3-Ultra")
+        self.assertTrue(all(t == 0.0 for t in fake_client.temperatures), f"Ожидалась temperature=0.0, получено {fake_client.temperatures}")
         self.assertEqual(len(task["modelAttempts"]), 3)
         self.assertEqual([a["model"] for a in task["modelAttempts"]], ["GigaChat-2-Pro", "GigaChat-2-Max", "GigaChat-3-Ultra"])
         self.assertEqual(task["applicableCount"], len(std_criteria) - 1)
@@ -346,6 +415,17 @@ class TestPythonPipeline(unittest.TestCase):
         self.assertEqual(task["tokenUsage"]["totalTokens"], 15950)
         # Критерий #2 имеет score=1 без явного timecodes -> пайплайн подтягивает 00:04:12 из details
         self.assertEqual(task["criteria"][1]["timecodes"], ["00:04:12"])
+        # Цитата (реплика) берётся только из ответа нейросети, а не подставляется из транскрипта
+        self.assertEqual(task["criteria"][0]["quote"], "")
+        self.assertEqual(task["criteria"][1]["quote"], "«Подождите, сейчас найду файл с задачей»")
+        self.assertNotIn("Приветствуем всех на занятии", task["criteria"][0]["quote"])
+
+        custom_prompt_path = os.path.join(self.tmp_dir, "prompt_active.txt")
+        with open(custom_prompt_path, "w", encoding="utf-8") as f:
+            f.write("Оцени занятие и верни criteria_scores и timecodes.")
+        built_prompt, _ = ktalk_gigachat_pipeline.build_system_prompt("")
+        self.assertIn('"quote"', built_prompt)
+
         self.assertTrue(closed_flag["closed"])
         self.assertEqual(set(deleted_ids), {"fid_audio", "fid_frame_0"})
         # Локальные временные файлы удалены (152-ФЗ)
@@ -393,6 +473,171 @@ class TestPythonPipeline(unittest.TestCase):
             )
         self.assertEqual(audio_id_2, "fid_audio_fallback")
         self.assertEqual(fallback_mimes, ["audio/mpeg", "audio/mp3"])
+
+    def test_pipeline_stops_without_rotation_when_truncated_by_length(self):
+        fake_video = os.path.join(self.tmp_dir, "trunc_video.mp4")
+        fake_audio = os.path.join(self.tmp_dir, "trunc_audio.mp3")
+        fake_frame = os.path.join(self.tmp_dir, "trunc_frame.jpg")
+        with open(fake_video, "wb") as f:
+            f.write(b"v" * 2048)
+        with open(fake_audio, "wb") as f:
+            f.write(b"a" * 4096)
+        with open(fake_frame, "wb") as f:
+            f.write(b"f" * 1024)
+
+        partial_scores = [
+            {"id": i, "criterion": f"К{i}", "quote": "", "timecodes": [], "details": "Ок", "score": 0}
+            for i in range(1, 16)
+        ]
+
+        class TruncatedClient:
+            def __init__(self):
+                self.calls = []
+
+            async def aclose(self):
+                return None
+
+            async def achat(self, chat_payload):
+                self.calls.append(chat_payload.model)
+                if len(self.calls) > 1:
+                    raise AssertionError(f"Не должно быть переключения на следующую модель: {self.calls}")
+                return types.SimpleNamespace(
+                    usage=types.SimpleNamespace(prompt_tokens=20000, completion_tokens=8192, total_tokens=28192),
+                    choices=[types.SimpleNamespace(
+                        finish_reason="length",
+                        message=types.SimpleNamespace(content=json.dumps({"criteria_scores": partial_scores}, ensure_ascii=False)),
+                    )],
+                )
+
+        trunc_client = TruncatedClient()
+
+        async def mock_is_meet_available(url, api_key):
+            return {"title": "Олимпиадная химия", "login": "ivanov", "name": "Иван", "surname": "Иванов", "date": "2026-11-12"}
+
+        async def mock_download_all(url, api_key, task_prefix=""):
+            return {"video": fake_video}
+
+        async def mock_extract_media(v_path):
+            return fake_audio, [(0, fake_frame)]
+
+        async def mock_upload_files(client, audio_path, img_paths, max_frames=30):
+            return "fid_audio", [("00:00", "fid_frame_0", fake_frame)], 1
+
+        with patch.dict(os.environ, {"TALK_API_KEY": "test_talk", "GIGACHAT_CREDENTIALS": "test_giga"}), \
+             patch.object(fetch_talk, "is_meet_available", side_effect=mock_is_meet_available), \
+             patch.object(fetch_talk, "download_all_artifacts_by_url", side_effect=mock_download_all), \
+             patch.object(file_processing, "extract_media_async", side_effect=mock_extract_media), \
+             patch.object(file_processing, "_get_video_duration_seconds", return_value=120.0), \
+             patch.object(ai_gigachat, "get_gigachat_client", return_value=trunc_client), \
+             patch.object(ai_gigachat, "_upload_files_to_gigachat", side_effect=mock_upload_files):
+            task = asyncio.run(ktalk_gigachat_pipeline.execute_ktalk_gigachat_pipeline(
+                task_id="lec_test_trunc",
+                lecture_url="https://olymp.ktalk.ru/recordings/rec_trunc",
+                teacher_name="Иван Иванов",
+            ))
+
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(trunc_client.calls, ["GigaChat-2-Pro"])
+        self.assertEqual(len(task["modelAttempts"]), 1)
+        self.assertEqual(task["modelAttempts"][0]["status"], "truncated")
+        self.assertEqual(task["aiModel"], "GigaChat-2-Pro")
+        self.assertIn("finish_reason=length", task["errorMessage"])
+
+    def test_critical_violations_and_timecodes_normalization(self):
+        # 1. ИИ перечислил критическое нарушение в critical_details (в виде dict), но забыл переключить is_critical
+        raw_forgotten_flag = json.dumps({
+            "is_critical": "false",
+            "critical_details": [
+                {"title": "Фактическая ошибка", "timecode": "00:18:10", "details": "Неверная формула без исправления."}
+            ],
+            "criteria_scores": [
+                {"id": 1, "criterion": "Владение материалом", "quote": "«Формула такая»", "timecodes": "00:18:10, 00:22:05", "details": "Ошибка в теории", "score": 2}
+            ],
+            "point": 2,
+            "comment": "Найдена критическая ошибка на 00:18:10.",
+            "recommendations": ["Исправить формулу"]
+        }, ensure_ascii=False)
+        parsed = ai_common.parse_analysis_json(raw_forgotten_flag)
+        self.assertTrue(parsed["is_critical"])
+        self.assertEqual(parsed["critical_details"], ["00:18:10 — Фактическая ошибка: Неверная формула без исправления."])
+
+        # 2. ИИ скопировал заглушку или написал "нет" -> должно очищаться в [] и is_critical=False
+        raw_placeholder = json.dumps({
+            "is_critical": "false",
+            "critical_details": ["<ЧЧ:ММ:СС — подробное описание критического нарушения при наличии>", "Критических нарушений нет"],
+            "criteria_scores": [
+                {"id": 1, "criterion": "К1", "quote": "", "timecodes": [], "details": "Ок", "score": 0}
+            ],
+            "point": 0,
+            "comment": "Ок",
+            "recommendations": ["Ок"]
+        }, ensure_ascii=False)
+        parsed_clean = ai_common.parse_analysis_json(raw_placeholder)
+        self.assertFalse(parsed_clean["is_critical"])
+        self.assertEqual(parsed_clean["critical_details"], [])
+
+        # 3. Пайплайн сохраняет criticalViolations и разбивает строковые таймкоды
+        fake_video = os.path.join(self.tmp_dir, "crit_video.mp4")
+        fake_audio = os.path.join(self.tmp_dir, "crit_audio.mp3")
+        fake_frame = os.path.join(self.tmp_dir, "crit_frame.jpg")
+        for p, b in [(fake_video, b"v" * 2048), (fake_audio, b"a" * 4096), (fake_frame, b"f" * 1024)]:
+            with open(p, "wb") as f:
+                f.write(b)
+
+        std_criteria, _ = ktalk_gigachat_pipeline.load_dynamic_criteria()
+        scores = [
+            {"id": idx, "criterion": f"К{idx}", "quote": "", "timecodes": "00:11:05, 00:18:10" if idx == 1 else [], "details": "Нарушение" if idx == 1 else "Ок", "score": 2 if idx == 1 else 0}
+            for idx in range(1, len(std_criteria) + 1)
+        ]
+
+        class CritClient:
+            async def aclose(self):
+                return None
+
+            async def achat(self, chat_payload):
+                return types.SimpleNamespace(
+                    usage=types.SimpleNamespace(prompt_tokens=12000, completion_tokens=1500, total_tokens=13500),
+                    choices=[types.SimpleNamespace(
+                        finish_reason="stop",
+                        message=types.SimpleNamespace(content=json.dumps({
+                            "is_critical": False,
+                            "critical_details": ["00:18:10 — Фактическая ошибка: неверное утверждение без исправления."],
+                            "criteria_scores": scores,
+                            "point": 2,
+                            "comment": "Обнаружена ошибка на 00:18:10.",
+                            "recommendations": ["Р1", "Р2", "Р3", "Р4", "Р5"]
+                        }, ensure_ascii=False))
+                    )]
+                )
+
+        async def mock_is_meet_available(url, api_key):
+            return {"title": "Олимпиадная математика", "login": "ivanov", "name": "Иван", "surname": "Иванов", "date": "2026-11-12"}
+
+        async def mock_download_all(url, api_key, task_prefix=""):
+            return {"video": fake_video}
+
+        async def mock_extract_media(v_path):
+            return fake_audio, [(0, fake_frame)]
+
+        async def mock_upload_files(client, audio_path, img_paths, max_frames=30):
+            return "fid_audio", [("00:00", "fid_frame_0", fake_frame)], 1
+
+        with patch.dict(os.environ, {"TALK_API_KEY": "test_talk", "GIGACHAT_CREDENTIALS": "test_giga"}), \
+             patch.object(fetch_talk, "is_meet_available", side_effect=mock_is_meet_available), \
+             patch.object(fetch_talk, "download_all_artifacts_by_url", side_effect=mock_download_all), \
+             patch.object(file_processing, "extract_media_async", side_effect=mock_extract_media), \
+             patch.object(file_processing, "_get_video_duration_seconds", return_value=120.0), \
+             patch.object(ai_gigachat, "get_gigachat_client", return_value=CritClient()), \
+             patch.object(ai_gigachat, "_upload_files_to_gigachat", side_effect=mock_upload_files):
+            task = asyncio.run(ktalk_gigachat_pipeline.execute_ktalk_gigachat_pipeline(
+                task_id="lec_test_crit",
+                lecture_url="https://olymp.ktalk.ru/recordings/rec_crit",
+                teacher_name="Иван Иванов",
+            ))
+
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["criticalViolations"], ["00:18:10 — Фактическая ошибка: неверное утверждение без исправления."])
+        self.assertEqual(task["criteria"][0]["timecodes"], ["00:11:05", "00:18:10"])
 
 
 if __name__ == "__main__":

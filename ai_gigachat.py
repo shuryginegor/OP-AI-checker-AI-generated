@@ -473,8 +473,9 @@ def plan_multimodal_budget(
     reserved_out = max(2_048, min(8_192, int(reserved_out)))
 
     available_input = max(12_000, budget_total - reserved_out)
-    CHARS_PER_TOKEN = 2.2
-    FRAME_TOKEN_COST = 1_100
+    # Консервативные коэффициенты для кириллицы, JSON-разметки и служебных метаданных кадров
+    CHARS_PER_TOKEN = 2.0
+    FRAME_TOKEN_COST = 1_150
 
     # 1. Аудиодорожка: НИКОГДА не обрезаем! Оценка ~1450 ток/МБ (или ~350 ток/мин).
     audio_size_mb = 0.0
@@ -487,15 +488,15 @@ def plan_multimodal_budget(
         est_by_dur = int((audio_duration_sec / 60.0) * 350) if audio_duration_sec > 0 else 0
         audio_tokens = max(est_by_mb, est_by_dur, 500)
 
-    # 2. Базовые текстовые токены
-    static_tokens = int(static_prompt_chars / CHARS_PER_TOKEN) + 600
+    # 2. Базовые текстовые токены (системный промпт + шаблон user_text + метаданные запроса)
+    static_tokens = int(static_prompt_chars / CHARS_PER_TOKEN) + 350
     summary_raw = (summary_text or "").strip()
     summary_tokens = int(len(summary_raw) / CHARS_PER_TOKEN)
 
     orig_transcript = (transcript_text or "").strip()
     orig_transcript_tokens = int(len(orig_transcript) / CHARS_PER_TOKEN)
 
-    # Целевое число кадров зависит от настроенного бюджета (30 при 128k, до 60 при 256k, меньше при 64k)
+    # Целевое число кадров зависит от настроенного бюджета (30 при 128k, до 60 при 256k, ~23 при 100k)
     scaled_cap = max(10, min(60, int(round((budget_total / 128_000.0) * 30))))
     desired_frames = min(total_extracted_frames, scaled_cap) if total_extracted_frames > 0 else 0
 
@@ -510,7 +511,7 @@ def plan_multimodal_budget(
     total_with_desired = audio_tokens + static_tokens + summary_tokens + orig_transcript_tokens + (target_frames * FRAME_TOKEN_COST)
 
     if total_with_desired > available_input:
-        # Шаг 1: Сначала пробуем уложиться, сжимая ТОЛЬКО транскрипт (сохраняя min_transcript_floor ~6000 токенов для таймкодов)
+        # Шаг 1: Сначала пробуем уложиться, сжимая ТОЛЬКО транскрипт (сохраняя min_transcript_floor ~10% бюджета)
         min_transcript_tokens = min(orig_transcript_tokens, max(2_500, int(available_input * 0.10)))
         room_for_transcript = remaining_after_audio_static - (target_frames * FRAME_TOKEN_COST)
 
@@ -528,23 +529,39 @@ def plan_multimodal_budget(
             # Шаг 2: Урезаем кадры под остаток после нетронутого аудио + базового промпта + сжатого транскрипта
             room_for_frames = remaining_after_audio_static - used_transcript_tokens
             if total_extracted_frames > 0:
-                min_frames_floor = min(3, total_extracted_frames)
-                calculated_frames = room_for_frames // FRAME_TOKEN_COST
+                max_frames_by_hard_limit = max(0, (available_input - audio_tokens - static_tokens) // FRAME_TOKEN_COST)
+                min_frames_floor = min(3, total_extracted_frames, max_frames_by_hard_limit)
+                calculated_frames = max(0, room_for_frames // FRAME_TOKEN_COST)
                 target_frames = max(min_frames_floor, min(desired_frames, calculated_frames))
             else:
                 target_frames = 0
 
-            # Если даже с минимумом кадров (3 шт.) все ещё не влезаем (очень маленький бюджет и сверхдлинное аудио),
-            # дожимаем транскрипт/саммари (но аудио всё равно не трогаем!).
-            recalc_room_for_text = available_input - audio_tokens - static_tokens - (target_frames * FRAME_TOKEN_COST)
-            if recalc_room_for_text < summary_tokens + int(len(final_transcript) / CHARS_PER_TOKEN):
+            # Если даже после урезания кадров всё ещё превышаем available_input (например, длинный промпт + тяжёлое аудио),
+            # жёстко подгоняем транскрипт и саммари строго в оставшийся коридор (аудио никогда не режем!).
+            recalc_room_for_text = max(0, available_input - audio_tokens - static_tokens - (target_frames * FRAME_TOKEN_COST))
+            cur_summary_tokens = int(len(final_summary) / CHARS_PER_TOKEN)
+            cur_transcript_tokens = int(len(final_transcript) / CHARS_PER_TOKEN)
+            if recalc_room_for_text < cur_summary_tokens + cur_transcript_tokens:
+                # Оставляем под саммари не более 35% доступного текстового окна (и максимум 1500 ток.), если не помещается целиком
+                if cur_summary_tokens > int(recalc_room_for_text * 0.35):
+                    max_sum_tokens = min(cur_summary_tokens, max(0, int(recalc_room_for_text * 0.35)))
+                    max_sum_chars = int(max_sum_tokens * CHARS_PER_TOKEN)
+                    if max_sum_chars < 60:
+                        final_summary = ""
+                    else:
+                        suffix = "\n... [пересказ сокращён под лимит токенов]"
+                        final_summary = final_summary[:max(0, max_sum_chars - len(suffix))] + suffix
+                    cur_summary_tokens = int(len(final_summary) / CHARS_PER_TOKEN)
+
+                avail_for_tr = max(0, recalc_room_for_text - cur_summary_tokens)
                 if final_transcript:
-                    avail_for_tr = max(800, recalc_room_for_text - min(summary_tokens, 2_000))
-                    final_transcript, transcript_trimmed = compact_transcript_preserving_timeline(
-                        orig_transcript, int(avail_for_tr * CHARS_PER_TOKEN)
-                    )
-                if len(final_summary) > 4_000 and recalc_room_for_text < 4_000:
-                    final_summary = final_summary[:3_500] + "\n... [пересказ сокращён под лимит токенов]"
+                    if avail_for_tr < 150:
+                        final_transcript = ""
+                        transcript_trimmed = True
+                    else:
+                        final_transcript, transcript_trimmed = compact_transcript_preserving_timeline(
+                            orig_transcript, int(avail_for_tr * CHARS_PER_TOKEN)
+                        )
 
     final_text_tokens = static_tokens + int(len(final_summary) / CHARS_PER_TOKEN) + int(len(final_transcript) / CHARS_PER_TOKEN)
     frames_tokens = target_frames * FRAME_TOKEN_COST
@@ -806,7 +823,7 @@ async def process(artifacts: dict, additional_info: str = "", bot=None, tg_id: i
                 attachments=uploaded_file_ids if uploaded_file_ids else None,
             ),
         ]
-        chat_payload = Chat(model=MODEL_ROTATION_CHAIN[0], messages=messages, max_tokens=8192, temperature=0.1)
+        chat_payload = Chat(model=MODEL_ROTATION_CHAIN[0], messages=messages, max_tokens=8192, temperature=0.0)
         job_name = f"gigachat_{uuid.uuid4().hex[:12]}"
         if bot and tg_id and db_id:
             task_dispatched = True

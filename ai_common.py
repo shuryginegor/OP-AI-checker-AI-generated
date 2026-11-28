@@ -29,38 +29,42 @@ def get_json_output_prompt_instructions() -> str:
     std_list, _ = criteria.get_dynamic_criteria()
     count = len(std_list)
     return f"""
-Проведи детальный анализ по ВСЕМ некритическим критериям (всего их {count}) и выдай итоговый ответ СТРОГО в формате JSON со следующими ключами:
+Проведи объективный, воспроизводимый аудит по ВСЕМ некритическим критериям (всего их {count}) и выдай итоговый ответ СТРОГО в формате одного валидного JSON-объекта со следующими ключами (для каждого критерия СТРОГО соблюдай порядок «сначала факты → затем оценка score»):
 {{
-  "is_critical": <true или false>,
-  "critical_details": ["<таймкод — подробное описание критического нарушения 1>", "<таймкод — подробное описание критического нарушения 2>"],
+  "is_critical": false,
+  "critical_details": [],
   "criteria_scores": [
      {{
        "id": 1,
-       "criterion": "1. Преподаватель уверенно ведёт разбор...",
-       "score": <0, 1, 2 или null>,
+       "criterion": "Краткое название (2–4 слова)",
+       "quote": "«точная дословная реплика (1–2 фразы) или пустая строка»",
        "timecodes": ["00:14:20"],
-       "quote": "«прямая цитата из урока»",
-       "details": "<подробная фиксация с таймкодами и объяснением, почему снято 0, 1 или 2 балла>"
+       "details": "<1–3 ёмких предложения по делу: наблюдаемые факты с таймкодами и обоснование балла>",
+       "score": <0, 1, 2 или null>
      }}
-     ... ВАЖНО: Массив "criteria_scores" должен содержать СТРОГО ВСЕ {count} КРИТЕРИЕВ (id от 1 до {count} по порядку). Не пропускай ни одного критерия!
+     ... ВАЖНО: Массив "criteria_scores" должен содержать СТРОГО ВСЕ {count} КРИТЕРИЕВ (id от 1 до {count} по порядку). Не дублируй в `criterion` длинную формулировку и пиши без лишней «воды», сохраняя все факты и таймкоды!
   ],
-  "point": <суммарный штраф — сумма всех СНЯТЫХ баллов по применимым некритическим критериям>,
-  "comment": "<подробный комментарий (ровно 10-15 предложений) с таймкодами и фиксацией основных недостатков>",
-  "recommendations": "<рекомендации преподавателю (ровно 5 предложений) как исправить ошибки>"
+  "point": <суммарный штраф — точная сумма всех СНЯТЫХ баллов (score) по применимым некритическим критериям>,
+  "comment": "<содержательный хронологический разбор занятия (8–12 предложений) с сильными сторонами, замечаниями и таймкодами>",
+  "recommendations": [
+    "Конкретная практическая рекомендация 1 (с таймкодом проблемного места)",
+    "Конкретная практическая рекомендация 2",
+    "Конкретная практическая рекомендация 3",
+    "Конкретная практическая рекомендация 4",
+    "Конкретная практическая рекомендация 5"
+  ]
 }}
 ПРАВИЛА ОЦЕНИВАНИЯ КРИТИЧЕСКИХ НАРУШЕНИЙ:
-- Ищи и зафиксируй ВСЕ критические нарушения из списка. НЕ останавливайся при обнаружении первого!
-- Если найдено хотя бы одно нарушение — поставь `"is_critical": true` и перечисли ВСЕ найденные критические нарушения в `"critical_details"` с таймкодами и подробным описанием.
+- Проверяй ВСЕ критические нарушения из списка.
+- Если найдено хотя бы одно доказанное критическое нарушение — поставь `"is_critical": true` и перечисли их в `"critical_details"` в формате `["ЧЧ:ММ:СС — Название нарушения: конкретный факт"]`.
 - Если критических нарушений нет — поставь `"is_critical": false` и `"critical_details": []`.
 
-ПРАВИЛА ОЦЕНИВАНИЯ НЕКРИТИЧЕСКИХ КРИТЕРИЕВ (`score` — сколько баллов СНИМАЕТСЯ):
-- `0`: Критерий выполнен качественно, нарушений нет (0 баллов снимается). В `timecodes` передавай строго `[]`.
-- `1`: Частичное выполнение / небольшое нарушение (снимается 1 балл). Укажи точную причину в `details` и таймкоды нарушения в `timecodes`.
-- `2`: Критерий не выполнен / грубое нарушение (снимается 2 балла). Укажи точную причину в `details` и таймкоды нарушения в `timecodes`.
-- `null`: Критерий не применим из-за формата урока или доп. информации. ОБЯЗАТЕЛЬНО укажи причину неприменимости в `details` и передай `"timecodes": []`.
-- СОГЛАСОВАННОСТЬ: Если найдено нарушение и зафиксирован таймкод нарушения — ЗАПРЕЩЕНО оставлять `score: 0`, обязательно снимай `1` или `2` балла.
-
-СТРОГОЕ ТРЕБОВАНИЕ: В массиве `criteria_scores` должно быть ровно {count} объектов (по одному объекту на каждый критерий от id 1 до {count}). Если критерий не применим — ставь `score: null` и обязательно заполняй `details` с причиной.
+ПОРОГИ ОЦЕНИВАНИЯ НЕКРИТИЧЕСКИХ КРИТЕРИЕВ (`score` — сколько баллов СНИМАЕТСЯ):
+- `0`: Нарушений не выявлено, критерий подтверждён ходом урока (не штрафуй за естественные рабочие микропаузы 2–5 сек). В `timecodes` передавай строго `[]`.
+- `1`: 1–2 локальных эпизода отклонения или умеренный методический/технический пробел, не сорвавший урок. Укажи точные таймкоды эпизодов в `timecodes` и факты в `details`.
+- `2`: Системное или грубое нарушение (3+ повторяющихся эпизодов, длительность >3–5 мин или серьёзный срыв этапа урока). Укажи таймкоды в `timecodes` и факты в `details`.
+- `null`: Критерий объективно неприменим из-за формата занятия или дополнительной информации пользователя. Укажи причину в `details` и передай `"timecodes": []`.
+- СОГЛАСОВАННОСТЬ И ЧЕСТНОСТЬ: Не завышай оценки из вежливости, но и не выдумывай ошибки без опоры на аудио, кадры и транскрипт. Если в `details` зафиксировано реальное замечание с таймкодом — ЗАПРЕЩЕНО оставлять `score: 0`.
 """.strip()
 
 
@@ -197,18 +201,73 @@ def parse_analysis_json(text_or_dict) -> dict:
         logger.error(f"[parse_analysis_json] Массив критериев не найден или не содержит применимых критериев!\nИсходные данные: {data}")
         raise ValueError("Ответ модели не содержит валидного списка критериев оценки (criteria_scores пуст или все оценки некорректны).")
 
-    is_critical = bool(data.get("is_critical", False))
-    raw_crit = data.get("critical_details") or data.get("critical_violations") or []
-    if isinstance(raw_crit, str):
-        raw_crit = [raw_crit] if raw_crit.strip() and raw_crit.strip().lower() not in ("null", "none", "нет") else []
+    def _is_empty_crit_text(text: str) -> bool:
+        low = text.strip().lower().strip(" .!«»\"'")
+        if not low:
+            return True
+        if low.startswith("<") and low.endswith(">"):
+            return True
+        return low in (
+            "null",
+            "none",
+            "нет",
+            "отсутствуют",
+            "отсутствует",
+            "не выявлено",
+            "не обнаружено",
+            "критических нарушений нет",
+            "критических нарушений не выявлено",
+            "критических нарушений не обнаружено",
+            "без критических нарушений",
+        )
+
+    def _format_crit_item(cd) -> str:
+        if cd is None:
+            return ""
+        if isinstance(cd, dict):
+            tc_raw = cd.get("timecode") or cd.get("timecodes") or cd.get("tc") or ""
+            if isinstance(tc_raw, list):
+                tc_str = ", ".join(str(x).strip() for x in tc_raw if x is not None and str(x).strip())
+            else:
+                tc_str = str(tc_raw).strip()
+            title = str(cd.get("title") or cd.get("criterion") or cd.get("name") or "").strip()
+            desc = str(cd.get("details") or cd.get("description") or cd.get("desc") or cd.get("comment") or "").strip()
+            parts = []
+            if title and desc and title.lower() not in desc.lower():
+                parts.append(f"{title}: {desc}")
+            elif desc:
+                parts.append(desc)
+            elif title:
+                parts.append(title)
+            body = " ".join(parts).strip()
+            if tc_str and tc_str not in body:
+                return f"{tc_str} — {body}" if body else tc_str
+            return body
+        return str(cd).strip()
+
+    raw_flag = data.get("is_critical", False)
+    if isinstance(raw_flag, bool):
+        is_critical = raw_flag
+    elif isinstance(raw_flag, str):
+        is_critical = raw_flag.strip().lower() in ("true", "1", "yes", "да")
+    else:
+        is_critical = bool(raw_flag)
+
+    raw_crit = data.get("critical_details") or data.get("critical_violations") or data.get("criticalViolations") or []
+    if isinstance(raw_crit, (str, dict)):
+        raw_crit = [raw_crit]
     elif not isinstance(raw_crit, list):
         raw_crit = []
-    critical_details = [
-        str(cd).strip()
-        for cd in raw_crit
-        if cd is not None and str(cd).strip() and str(cd).strip().lower() not in ("null", "none")
-    ]
-    if not critical_details:
+
+    critical_details: List[str] = []
+    for cd in raw_crit:
+        formatted_cd = _format_crit_item(cd)
+        if formatted_cd and not _is_empty_crit_text(formatted_cd) and formatted_cd not in critical_details:
+            critical_details.append(formatted_cd)
+
+    if critical_details:
+        is_critical = True
+    else:
         is_critical = False
 
     comment = (
